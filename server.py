@@ -12,7 +12,7 @@ import serial
 import socket
 import struct
 
-#logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger()
 
 #### This should be generated from the packaged gdb xmls eventually
@@ -140,8 +140,9 @@ class UdkGdbServer(udkserver.UdkHostStub, gdbserver.GdbHostStub):
         self.add_udk_extension_handlers(b'checkexpat', self.udk_extension_checkexpat)
         self.add_udk_extension_handlers(b'exception', self.udk_extension_exception)
         self.add_udk_extension_handlers(b'symbol', self.udk_extension_symbol)
+        self.add_udk_extension_handlers(b'resettarget', self.udk_extension_resettarget)
 
-        #### Loaded Modules Extension
+        #### Loaded Modules UDK Extension
         self.add_udk_extension_handlers(b'fmodules', self.udk_extension_fmodules)
         self.add_udk_extension_handlers(b'smodules', self.udk_extension_smodules)
 
@@ -154,32 +155,40 @@ class UdkGdbServer(udkserver.UdkHostStub, gdbserver.GdbHostStub):
     def serial_handler(self):
         self.udk.command_communication()
 
+
     ##### GDB Target Stub Side
     ### Called by GDB to request the target continue execution
     def continue_execution(self, address = None):
         self.udk.go()
 
+    def step_instruction(self):
+        self.udk.single_stepping()
+
     ### Called by GDB to request the target architecture
     def get_architecture(self):
         return 'i386:x86-64'
+
+    def get_libraries(self):
+        return self.fmodules
 
     ### Called by GDB to request the break cause from the target
     def get_break_cause(self):
         cause, stop_address = self.udk.break_cause()
         nrs = {}
-        if cause == udkserver.BreakCauses.DEBUG_DATA_BREAK_CAUSE_IMAGE_LOAD:
-            nrs[b'library'] = b'0'
+#        if cause == udkserver.BreakCauses.DEBUG_DATA_BREAK_CAUSE_IMAGE_LOAD:
+#            nrs[b'library'] = b'0'
         return (cause, nrs)
 
     ### Called by GDB to request memory from the target
     def read_memory(self, address, size):
         return self.udk.read_memory(address, 1, size)
 
+    ### Called by GDB to request memory from the target
+    def write_memory(self, address, size, data):
+        return self.udk.write_memory(address, 1, size, data)
 
     def read_register(self, register):
-        udk_register = registers[register].udk
-        value = self.udk.read_register(udk_register)
-        return value
+        return self.udk.read_register(registers[register])
 
     ### Called by GDB to read the register state from the target
     def read_registers(self, defaults):
@@ -207,8 +216,8 @@ class UdkGdbServer(udkserver.UdkHostStub, gdbserver.GdbHostStub):
         self.udk.halt()
 #        viewpoint = self.udk.get_viewpoint()
         cause, stop_address = self.udk.break_cause()
-        nrs = {}
-        return (cause, nrs)
+        return (cause, {})
+
 
     #### GDB Protocol Extensions for UDK
     ###
@@ -233,8 +242,7 @@ class UdkGdbServer(udkserver.UdkHostStub, gdbserver.GdbHostStub):
     def udk_extension_next_module(self):
         try:
             first = next(self.fmodules_iter)
-            print(str(first))
-            msg = '{0:x};{1:x};{2}'.format(first['image_addr'], first['image_size'], first['pdb_name'])
+            msg = '0x{0:x};0x{1:x};{2}'.format(first.entrypoint, first.image_addr, first.pdb_name)
             self.gdb.send_packet(msg.encode('utf-8'))
         except StopIteration:
             self.gdb.send_packet(b'l')
@@ -259,9 +267,14 @@ class UdkGdbServer(udkserver.UdkHostStub, gdbserver.GdbHostStub):
         else:
             self.gdb.send_packet(b'E91')
 
+    def udk_extension_resettarget(self, args):
+        self.udk.reset()
+
+
     ##### UDK Host Side
     ### Called by UDK Server when memory is ready on the target
     def handle_memory_ready(self):
+        self.fmodules = []
         if self._socket:
             return
         self.start_socket()
@@ -272,28 +285,19 @@ class UdkGdbServer(udkserver.UdkHostStub, gdbserver.GdbHostStub):
         self.gdb.send_stop_reply_packet(5)
 
     ### Called by UDK Server when an image load event occurs on the target
-    def handle_break_cause_image_load(self, pdb_name_addr, image_context_addr):
-        image_context = self.read_memory(image_context_addr, 16)
-        image_addr, image_size = struct.unpack("<QQ", image_context)
+    def handle_break_cause_image_load(self, pdb_name, image_context):
+        logger.info('module {0} loaded at address 0x{1:x} with size 0x{2:x}'.format(image_context.pdb_name, image_context.image_addr, image_context.image_size))
+        self.fmodules.append(image_context)
 
-        pdb_name = b''
-        while b'\x00' not in pdb_name:
-            pdb_name += self.read_memory(pdb_name_addr, 16)
-            pdb_name_addr = pdb_name_addr + 16
+        if not self.gdb:
+            return
 
-        null = pdb_name.find(b'\x00')
-        pdb_name = pdb_name[0:null].decode('utf-8')
+        nrs = {b'library': b'0'}
+        self.gdb.send_stop_reply_packet(5, nrs)
 
-        logger.info('module {0} loaded at address {1:x} with size {2:x}'.format(pdb_name, image_addr, image_size))
-        self.fmodules.append({
-                "pdb_name": pdb_name,
-                "image_addr": image_addr,
-                "image_size": image_size
-            })
-
-        if self.gdb:
-            nrs = {b'library': b'0'}
-            self.gdb.send_stop_reply_packet(5, nrs)
+    ### Called by UDK Server when a SW breakpoint occurs on the target
+    def handle_break_cause_exception(self, stop_addres, vector, data):
+        self.gdb.send_stop_reply_packet(vector)
 
     def run(self):
         self.start_serial()
@@ -302,7 +306,6 @@ class UdkGdbServer(udkserver.UdkHostStub, gdbserver.GdbHostStub):
             for (fd, event) in self._poll.poll():
                 if event & (select.POLLHUP | select.POLLERR | select.POLLNVAL):
                     self.remove_poll_fd(fd)
-                    self.gdb = None
                     del self.connection
                     continue
 

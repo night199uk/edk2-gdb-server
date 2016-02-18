@@ -6,6 +6,7 @@ import binascii
 import xml.etree.ElementTree
 
 logger = logging.getLogger('gdbserver')
+logger.setLevel(logging.DEBUG)
 
 #### This should be generated from the gdb signals.def
 GDB_SIGNAL_0 = 0
@@ -106,7 +107,6 @@ class GdbHostStub(object):
         raise NotImplementedError("implement GdbHostStub and override get_break_cause")
 
     def get_features_xml(self, annex, offset, length):
-        logger.info(annex)
         if annex == b'target.xml':
             target = xml.etree.ElementTree.Element('target', version='1.0')
             architecture = xml.etree.ElementTree.SubElement(target, 'architecture')
@@ -115,10 +115,20 @@ class GdbHostStub(object):
 
         raise NotImplementedError('annex not defined')
 
+    def get_libraries_xml(self, annex, offset, length):
+        library_list = xml.etree.ElementTree.Element('library-list')
+        for lib in self.get_libraries():
+            library = xml.etree.ElementTree.SubElement(library_list, 'library', name=lib.pdb_name)
+            xml.etree.ElementTree.SubElement(library, 'segment', address='0x{0:x}'.format(lib.image_addr))
+        return xml.etree.ElementTree.tostring(library_list, encoding='utf-8', method='xml')
+
     def read_registers(self):
         raise NotImplementedError('implement GdbHostStub and override read_registers')
 
     def read_memory(self, address, size):
+        raise NotImplementedError("implement GdbHostStub and override read_memory")
+
+    def write_memory(self, address, size):
         raise NotImplementedError("implement GdbHostStub and override read_memory")
 
     def send_break(self):
@@ -126,6 +136,9 @@ class GdbHostStub(object):
 
     def continue_execution(self, address = None):
         raise NotImplementedError("implement GdbHostStub and override continue_execution")
+
+    def step_instruction(self):
+        raise NotImplementedError("implement GdbHostStub and override step_instruction")
 
 
 class GdbRemoteSerialProtocol(object):
@@ -139,8 +152,7 @@ class GdbRemoteSerialProtocol(object):
 
         self.features = {
             b'multiprocess': False,
-            b'xmlRegisters': False,
-            b'qXfer:libraries:read': False,
+            b'xmlRegisters': True,
             b'qRelocInsn': False
         }
 
@@ -148,11 +160,14 @@ class GdbRemoteSerialProtocol(object):
         self.general_query_xfer_handlers = collections.defaultdict(dict)
 
         #### Standard Packet Handlers
+        self.add_packet_handler(b'!', self.extended_mode)
         self.add_packet_handler(b'\x03', self.brk)
         self.add_packet_handler(b'c', self.continue_execution)
         self.add_packet_handler(b'g', self.read_registers)
         self.add_packet_handler(b'm', self.read_memory)
+        self.add_packet_handler(b'M', self.write_memory)
         self.add_packet_handler(b'p', self.read_register)
+        self.add_packet_handler(b's', self.step_instruction)
         self.add_packet_handler(b'?', self.halt_reason)
 
         #### General Query
@@ -180,6 +195,10 @@ class GdbRemoteSerialProtocol(object):
         #### qXfer:features:read feature
         self.add_feature(b'qXfer:features:read')
         self.add_general_query_xfer_handler(b'features', b'read', self.general_query_xfer_features_read)
+
+        #### qXfer:libraries:read feature
+        self.add_feature(b'qXfer:libraries:read')
+        self.add_general_query_xfer_handler(b'libraries', b'read', self.general_query_xfer_libraries_read)
 
         #### Thread Info
         self.add_packet_handler(b'H', self.set_thread)
@@ -222,11 +241,11 @@ class GdbRemoteSerialProtocol(object):
         if cmd == b'+' and initialized == False:
             return
 
-#        if cmd == b'\x03':
-#            logger.info('break received'.format(message))
+        if cmd == b'\x03':
+            logger.debug('break received'.format(message))
 
         if cmd not in self.packet_handlers:
-            logger.info('{} command not handled'.format(message))
+            logger.warning('{} command not handled'.format(message))
             self.send_packet(b'')
             return
 
@@ -265,7 +284,7 @@ class GdbRemoteSerialProtocol(object):
             cmd, args = query.split(b';', 1)
 
         if cmd not in self.verbose_handlers:
-            logger.error('This subcommand %r is not implemented in q' % cmd)
+            logger.error('This subcommand %r is not implemented in v' % cmd)
             self.send_packet(b'')
             return
 
@@ -299,13 +318,25 @@ class GdbRemoteSerialProtocol(object):
         xml = None
         try:
             xml = self.stub.get_features_xml(annex, offset, length)
+            if xml is None:
+                self.send_packet(b'')
+            else:
+                self.send_packet(b'l' + xml)
         except NotImplementedError:
             self.send_packet(b'E00')
-            return
 
-        if xml is None:
-            self.send_packet(b'')
-        self.send_packet(b'l' + xml)
+    def general_query_xfer_libraries_read(self, args):
+        annex, offsetlength = args.split(b':', 2)
+        offset, length = offsetlength.split(b',', 2)
+        xml = None
+        try:
+            xml = self.stub.get_libraries_xml(annex, offset, length)
+            if xml is None:
+                self.send_packet(b'')
+            else:
+                self.send_packet(b'l' + xml)
+        except NotImplementedError:
+            self.send_packet(b'E00')
 
     def general_query_attached(self, args):
         self.send_packet(b'1')
@@ -336,7 +367,6 @@ class GdbRemoteSerialProtocol(object):
     def general_query_tracepoint_subsequent(self, args):
         self.send_packet(b'')
 
-
     def general_set_start_no_ack_mode(self, args):
         self.no_acknowledgement_mode = True
         self.send_packet(b'OK')
@@ -347,6 +377,9 @@ class GdbRemoteSerialProtocol(object):
     def brk(self, args):
         (cause, nr) = self.stub.send_break()
         self.send_stop_reply_packet(cause, nr)
+
+    def extended_mode(self, args):
+        self.send_packet(b'OK')
 
     def set_thread(self, args):
         self.send_packet(b'OK')
@@ -413,16 +446,32 @@ class GdbRemoteSerialProtocol(object):
         addr = int(addr, 16)
         size = int(size, 16)
 
-        data = self.stub.read_memory(addr, size)
-        self.send_packet(binascii.hexlify(data))
+        try:
+            data = self.stub.read_memory(addr, size)
+            self.send_packet(binascii.hexlify(data))
+        except:
+            self.send_packet(b'E99')
+
+    def write_memory(self, args):
+        params, data = args.split(b':', 1)
+        addr, size = params.split(b',', 1)
+        addr = int(addr, 16)
+        size = int(size, 16)
+        data = binascii.unhexlify(data)
+
+        self.stub.write_memory(addr, size, data)
+        self.send_packet(b'OK')
+
+    def step_instruction(self, args):
+        self.stub.step_instruction()
+        (cause, nr) = self.stub.get_break_cause()
+        self.send_stop_reply_packet(cause, nr)
+
+
 
     def handle_k(self, cmd, subcmd):
         pass
 
-    def handle_s(self, cmd, subcmd):
-        self.log.info('Received a "single step" command')
-#        StepInto()
-        self.send('T%.2x' % GDB_SIGNAL_TRAP)
 
 
     ####

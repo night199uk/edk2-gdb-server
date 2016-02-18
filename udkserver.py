@@ -8,10 +8,10 @@ Entering any line of input at the terminal will exit the server.
 import logging
 import struct
 import enum
-import collections
+import ctypes
 
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger()
+logger = logging.getLogger('udkserver')
+logger.setLevel(logging.DEBUG)
 
 PACKET_READ_TIMEOUT = 0.25
 
@@ -213,6 +213,9 @@ class Register(enum.IntEnum):
     SOFT_DEBUGGER_REGISTER_MM6             =    (SOFT_DEBUGGER_REGISTER_FP_BASE + 0x28)
     SOFT_DEBUGGER_REGISTER_MM7             =    (SOFT_DEBUGGER_REGISTER_FP_BASE + 0x29)
 
+###
+# Errors
+#
 class UdkError(Exception):
     """Base class for exceptions in this module."""
     pass
@@ -246,6 +249,81 @@ class CrcError(UdkError):
 
     def __init__(self, crc_received):
         self.crc_received = crc_received
+
+class AbortError(UdkError):
+    """Raised when the target aborts a UDK command.
+
+    """
+
+class LoadedImageProtocol(ctypes.Structure):
+    _fields_ = [('revision', ctypes.c_uint32),
+                ('parent_handle', ctypes.c_uint64),
+                ('system_table', ctypes.c_uint64),
+                ('device_handle', ctypes.c_uint64),
+                ('file_path', ctypes.c_uint64),
+                ('reserved', ctypes.c_uint64),
+                ('load_options_size', ctypes.c_uint32),
+                ('load_options', ctypes.c_uint64),
+                ('image_base', ctypes.c_uint64),
+                ('image_size', ctypes.c_uint64),
+                ('image_code_type', ctypes.c_uint8),
+                ('image_data_type', ctypes.c_uint8),
+                ('image_unload', ctypes.c_uint64)]
+
+
+class PeCoffLoaderImageContext(ctypes.Structure):
+    _fields_ = [('image_addr', ctypes.c_ulonglong),
+                ('image_size', ctypes.c_ulonglong),
+                ('destination_address', ctypes.c_ulonglong),
+                ('entrypoint', ctypes.c_ulonglong),
+                ('image_read', ctypes.c_ulonglong),
+                ('handle', ctypes.c_ulonglong),
+                ('fixup_data', ctypes.c_ulonglong),
+                ('section_alignment', ctypes.c_ulong),
+                ('pe_coff_header_offset', ctypes.c_ulong),
+                ('debug_directory_entry_rva', ctypes.c_ulong),
+                ('code_View', ctypes.c_ulonglong),
+                ('pdb_pointer', ctypes.c_ulonglong),
+                ('size_of_headers', ctypes.c_ulonglong),
+                ('image_code_memory_type', ctypes.c_ulong),
+                ('image_data_memory_type', ctypes.c_ulong),
+                ('image_error', ctypes.c_ulong),
+                ('fixup_data_size', ctypes.c_ulonglong),
+                ('machine', ctypes.c_ushort),
+                ('image_type', ctypes.c_ushort),
+                ('relocations_stripped', ctypes.c_bool),
+                ('is_te_image', ctypes.c_bool),
+                ('hii_resource_data', ctypes.c_uint64),
+                ]
+
+class LoadedImagePrivateData(ctypes.Structure):
+    _fields_ = [('signature', ctypes.c_uint64),
+                ('handle', ctypes.c_uint64),
+                ('type', ctypes.c_uint64),
+                ('started', ctypes.c_uint8),
+                ('entrypoint', ctypes.c_uint64),
+                ('info', LoadedImageProtocol),
+                ('loaded_image_device_path', ctypes.c_uint64),
+                ('image_base_page', ctypes.c_uint64),
+                ('number_of_pages', ctypes.c_uint64),
+                ('fixup_data', ctypes.c_uint64),
+                ('tpl', ctypes.c_uint64),
+                ('status', ctypes.c_uint64),
+                ('exit_data_size', ctypes.c_uint64),
+                ('exit_data', ctypes.c_uint64),
+                ('jump_context', ctypes.c_uint64),
+                ('machine', ctypes.c_uint16),
+                ('ebc', ctypes.c_uint64),
+                ('runtime_data', ctypes.c_uint64),
+                ('image_context', PeCoffLoaderImageContext)]
+
+    @property
+    def pdb_name(self):
+        return self._pdb_name
+
+    @pdb_name.setter
+    def pdb_name(self, pdb_name):
+        self._pdb_name = pdb_name
 
 class Packet(object):
     def __init__(self, starting_symbol, command, seqno, data = b''):
@@ -330,7 +408,10 @@ class UdkHostStub(object):
     def handle_break_cause_sw_breakpoint(self, stop_address):
         raise NotImplementedError("implement UdkHostStub and override handle_break_cause_sw_breakpoint")
 
-    def handle_break_cause_image_load(self, pdb_addr, image_context_addr):
+    def handle_break_cause_image_load(self, pdb_name, image_context):
+        raise NotImplementedError("implement UdkHostStub and override handle_break_cause_image_load")
+
+    def handle_break_cause_exception(self, stop_address, vector, data):
         raise NotImplementedError("implement UdkHostStub and override handle_break_cause_image_load")
 
     def handle_memory_ready(self):
@@ -339,7 +420,6 @@ class UdkHostStub(object):
 class Server(object):
 
     def __init__(self, stub, commport):
-        self.log = logging.getLogger("server")
         self._seqno = 1
 
         self.target_seqno = -1
@@ -362,8 +442,9 @@ class Server(object):
         ## Break point handling
         self.break_point_handlers = {}
         self.add_handler(DebugCommands.DEBUG_COMMAND_BREAK_POINT, self.handle_break_point)
-        self.add_break_point_handler(BreakCauses.DEBUG_DATA_BREAK_CAUSE_IMAGE_LOAD, self.handle_break_cause_image_load)
         self.add_break_point_handler(BreakCauses.DEBUG_DATA_BREAK_CAUSE_SW_BREAKPOINT, self.handle_break_cause_sw_breakpoint)
+        self.add_break_point_handler(BreakCauses.DEBUG_DATA_BREAK_CAUSE_IMAGE_LOAD, self.handle_break_cause_image_load)
+        self.add_break_point_handler(BreakCauses.DEBUG_DATA_BREAK_CAUSE_EXCEPTION, self.handle_break_cause_exception)
 
     @property
     def seqno(self):
@@ -385,7 +466,6 @@ class Server(object):
             return
 
         if not packet.is_request():
-            logger.debug("TARGET: get command [{}] sequence no {} returned status".format(packet.command, packet.seqno))
             return
 
         logger.debug("Request {} sequence {}".format(packet.command, packet.seqno))
@@ -393,11 +473,11 @@ class Server(object):
             self.seqno = 1
             self.target_seqno = 0
         elif packet.seqno == self.target_seqno:
-            logger.debug("TARGET: received one old command [{}] against command [{}]".format(packet.command, packet.seqno))
+            logger.warning("TARGET: received one old command [{}] against command [{}]".format(packet.command, packet.seqno))
             self.send_ack_packet(self.last_ack, packet.seqno)
             return
-        elif packet.seqno == self.target_seqno + 1:
-            self.target_seqno = self.target_seqno + 1
+        elif packet.seqno == (self.target_seqno + 1) % 256:
+            self.target_seqno = (self.target_seqno + 1) % 256
         else:
             logger.warning("Receive one invalid command [{}] against command[{}]".format(packet.seqno, self.target_seqno))
             return
@@ -451,7 +531,7 @@ class Server(object):
 
             ### Ergh, these can come anywhere in the flow - output them and carry on
             if packet.command == DebugCommands.DEBUG_COMMAND_PRINT_MESSAGE:
-#                logger.info("------>TARGET: {}".format(packet.get_data().decode('utf-8')))
+                logger.debug("target: {}".format(packet.data.decode('utf-8')))
                 continue
 
             packet.dump(False)
@@ -461,7 +541,7 @@ class Server(object):
         if ack_command != DebugCommands.DEBUG_COMMAND_OK:
             logger.error("Send ACK({})".format(ack_command))
 
-        logger.info("SendAckPacket: SequenceNo = {}".format(seqno))
+        logger.debug("SendAckPacket: SequenceNo = {}".format(seqno))
         packet = Packet(DEBUG_STARTING_SYMBOL_NORMAL, ack_command, seqno)
         packet.dump(True)
         self.commport.write(packet.to_bytes())
@@ -486,10 +566,27 @@ class Server(object):
 
             if packet.command == DebugCommands.DEBUG_COMMAND_OK and packet.seqno == seqno:
                 # Received Ack OK
-                self.seqno = self.seqno + 1
+                self.seqno = (self.seqno + 1) % 256
                 return packet
+
+            elif packet.command == DebugCommands.DEBUG_COMMAND_HALT_DEFERRED and packet.seqno == seqno:
+                # Received Ack OK
+                self.seqno = (self.seqno + 1) % 256
+                return packet
+
+            elif packet.command == DebugCommands.DEBUG_COMMAND_HALT_PROCESSED and packet.seqno == seqno:
+                # Received Ack OK
+                self.seqno = (self.seqno + 1) % 256
+                return packet
+
+            elif packet.command == DebugCommands.DEBUG_COMMAND_ABORT and packet.seqno == seqno:
+                # Received Abort - due to error
+                logger.error("TARGET: Abort.")
+                self.seqno = (self.seqno + 1) % 256
+                raise AbortError()
+
             elif packet.command == DebugCommands.DEBUG_COMMAND_IN_PROGRESS and packet.seqno == seqno:
-                self.seqno = self.seqno + 1
+                self.seqno = (self.seqno + 1) % 256
                 while True:
                     continue_packet = Packet(DEBUG_STARTING_SYMBOL_NORMAL, DebugCommands.DEBUG_COMMAND_CONTINUE, self.seqno)
                     continue_packet.dump(True)
@@ -498,12 +595,12 @@ class Server(object):
                     additional = self.receive_packet()
                     if additional.command == DebugCommands.DEBUG_COMMAND_IN_PROGRESS and additional.seqno == self.seqno:
                         packet.data = packet.data + additional.data
-                        self.seqno = self.seqno + 1
+                        self.seqno = (self.seqno + 1) % 256
                         continue
                     elif additional.command == DebugCommands.DEBUG_COMMAND_OK and additional.seqno == self.seqno:
                         packet.data = packet.data + additional.data
                         packet.seqno = additional.seqno
-                        self.seqno = self.seqno + 1
+                        self.seqno = (self.seqno + 1) % 256
                         break
                     else:
                         raise UdkError("unknown packet type {} or unexpected sequence number {}".format(additional.command, additional.seqno))
@@ -555,12 +652,12 @@ class Server(object):
             self.go()
 
     def handle_memory_ready(self, packet):
-        logger.info("Target memory is ready!")
+        logger.debug("Target memory is ready!")
         self.stub.handle_memory_ready()
         self.go()
 
     def handle_break_point(self, packet):
-        logger.info("Target meet a breakpoint!")
+        logger.debug("Target meet a breakpoint!")
         self.get_viewpoint()
         cause, stop_address = self.break_cause()
         if cause in self.break_point_handlers:
@@ -569,60 +666,111 @@ class Server(object):
     def handle_break_cause_image_load(self, stop_address):
         pdb_addr = self.read_register(Register.SOFT_DEBUGGER_REGISTER_DR1)  # ImageContext->PdbPointer *
         image_context_addr = self.read_register(Register.SOFT_DEBUGGER_REGISTER_DR2)  # ImageContext *
-        self.stub.handle_break_cause_image_load(pdb_addr, image_context_addr)
+
+        loaded_image_private_data_addr = image_context_addr - LoadedImagePrivateData.image_context.offset;
+        loaded_image_private_data_buffer = self.read_memory(loaded_image_private_data_addr, 1, 512)
+        loaded_image_private_data = LoadedImagePrivateData.from_buffer_copy(loaded_image_private_data_buffer)
+
+        image_context = loaded_image_private_data.image_context
+
+        logger.debug('signature: 0x{0:x}'.format(loaded_image_private_data.signature))
+        if loaded_image_private_data.signature == 0x6972646c:
+            logger.debug('EDK_LOADED_IMAGE_PRIVATE_DATA:')
+            logger.debug('signature: 0x{0:x} entrypoint: 0x{1:x}, image_base_page: 0x{2:x}, number_of_pages: 0x{3:x}'
+                .format(loaded_image_private_data.signature,
+                        loaded_image_private_data.entrypoint,
+                        loaded_image_private_data.image_base_page,
+                        loaded_image_private_data.number_of_pages))
+
+            logger.debug('EFI_LOADED_IMAGE_PROTOCOL:')
+            logger.debug('revision: 0x{0:x} image_base: 0x{1:x}, image_size: 0x{2:x}'
+                .format(loaded_image_private_data.info.revision,
+                        loaded_image_private_data.info.image_base,
+                        loaded_image_private_data.info.image_size))
+
+            if image_context.image_addr == 0x0:
+                image_context.image_addr = loaded_image_private_data.info.image_base
+
+            if image_context.image_size == 0x0:
+                image_context.image_size = loaded_image_private_data.info.image_size
+
+            if image_context.entrypoint == 0x0:
+                image_context.entrypoint = loaded_image_private_data.entrypoint
+
+
+        pdb_name_addr = pdb_addr
+        pdb_name = b''
+        while b'\x00' not in pdb_name:
+            pdb_name += self.read_memory(pdb_name_addr, 1, 16)
+            pdb_name_addr = pdb_name_addr + 16
+
+        null = pdb_name.find(b'\x00')
+        pdb_name = pdb_name[:null].decode('utf-8')
+
+        image_context.pdb_name = pdb_name
+        self.stub.handle_break_cause_image_load(pdb_name, image_context)
 
     def handle_break_cause_sw_breakpoint(self, stop_address):
         self.stub.handle_break_cause_sw_breakpoint(stop_address)
 
+    def handle_break_cause_exception(self, stop_address):
+        vector, data, = self.get_exception()
+        self.stub.handle_break_cause_exception(stop_address, vector, data)
+
+    #### Commands which send no response data
     def halt(self):
-        logger.warning("Halt() called")
+        logger.debug("Halt() called")
         self.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_HALT, 0)
-        logger.warning("Halt() returning")
+        logger.debug("Halt() returning")
 
     def reset(self):
-        logger.warning("Halt() called")
+        logger.debug("Halt() called")
         self.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_RESET, 0)
-        logger.warning("Halt() returning")
+        logger.debug("Halt() returning")
 
     def go(self):
-        logger.warning("IGo() called")
+        logger.debug("IGo() called")
         self.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_GO, 0)
-        logger.warning("IGo() returning")
+        logger.debug("IGo() returning")
 
+    #### Commands which send response data
     def break_cause(self):
-        logger.warning("BreakCause() called")
+        logger.debug("BreakCause() called")
         response = self.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_BREAK_CAUSE, 0)
         cause, stop_address = struct.unpack("<BQ", response.data)
         self.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
-        logger.warning("BreakCause() returning : Cause = {} StopAddress = 0x{:0>16x}".format(cause, stop_address))
+        logger.debug("BreakCause() returning : Cause = {} StopAddress = 0x{:0>16x}".format(cause, stop_address))
         return (cause, stop_address)
 
     def get_revision(self):
-        logger.warning("QueryRevision() called")
+        logger.debug("QueryRevision() called")
         response = self.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_GET_REVISION, 0)
         revision, capabilities = struct.unpack("<II", response.data)
         self.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
-        logger.warning("QueryRevision() returning : Revision = {} Capability = {}".format(revision, capabilities))
+        logger.debug("QueryRevision() returning : Revision = {} Capability = {}".format(revision, capabilities))
 
     def get_viewpoint(self):
-        logger.warning("IGetViewpoint() called")
+        logger.debug("IGetViewpoint() called")
         response = self.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_GET_VIEWPOINT, 0)
         target_viewpoint, = struct.unpack("<I", response.data)
         self.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
-        logger.warning("IGetViewpoint() returning : TargetViewpoint = {}".format(target_viewpoint))
+        logger.debug("IGetViewpoint() returning : TargetViewpoint = {}".format(target_viewpoint))
         return target_viewpoint
 
-    def halt(self):
-        logger.warning("IHalt() called")
-        self.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_HALT, 0)
-        logger.warning("IHalt() returning")
+    def get_exception(self):
+        logger.debug("GetException() called")
+        response = self.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_GET_EXCEPTION, 0)
+        vector, data, = struct.unpack("<BI", response.data)
+        self.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
+        logger.debug("GetException() returning : Exception = {} Data = {!s}".format(vector, data))
+        return (vector, data)
 
     def memory_ready(self):
-        logger.warning("MemoryReady() called")
+        logger.debug("MemoryReady() called")
         response = self.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_MEMORY_READY, 0)
         ready, = struct.unpack("<B", response.data)
         self.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
-        logger.warning("MemoryReady() returning : Ready = {}".format(ready))
+        logger.debug("MemoryReady() returning : Ready = {}".format(ready))
         return ready
 
     def cpuid(self, eax, ecx):
@@ -632,7 +780,7 @@ class Server(object):
         return (eax, ebx, ecx, edx)
 
     def put_debugger_setting(self, key, value):
-        logger.warning("PutDebuggerSetting() called: Key = {} Value = {}".format(key, value))
+        logger.debug("PutDebuggerSetting() called: Key = {} Value = {}".format(key, value))
         data = struct.pack("<BB", key, value)
         self.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_SET_DEBUG_SETTING, 0, data)
 
@@ -642,8 +790,13 @@ class Server(object):
         self.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
         return response.data
 
+    def write_memory(self, address, width, count, data):
+        request = struct.pack("<QBH", address, width, count)
+        response = self.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_WRITE_MEMORY, 0, request + data)
+        return response.data
+
     def read_register(self, register):
-        logger.warning("ReadRegister() called")
+        logger.debug("ReadRegister() called")
         request = struct.pack('<B', register.value)
         response = self.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_READ_REGISTER, 0, request)
         self.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
@@ -662,8 +815,27 @@ class Server(object):
             value1, value2, = struct.unpack("<QQ", response.data)
             value = (value1 << 64) | value2
 
-        logger.warning("ReadRegister() returning : Register {} Value = {}".format(register.name, value))
+        logger.debug("ReadRegister() returning : Register {} Value = {}".format(register.name, value))
         return value
+
+    def write_register(self, register, value):
+        logger.debug("WriteRegister() called")
+        size = self.get_register_size(register)
+        request = struct.pack('<BB', register.value, size)
+        data = None
+        if size == 2:
+            data = struct.pack("<H", value)
+        elif size == 4:
+            data = struct.pack("<I", value)
+        elif size == 8:
+            data = struct.pack("<Q", value)
+        elif size == 10:
+            raise NotImplementedError
+        elif size == 16:
+            data = struct.pack("<QQ", value[0], value[1])
+
+        response = self.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_READ_REGISTER, 0, request + data)
+        self.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
 
     def read_registers(self):
         response = self.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_READ_ALL_REGISTERS, 0)
@@ -712,3 +884,8 @@ class Server(object):
         self.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
         registers = dict(zip(keys, values))
         return registers
+
+    def single_stepping(self):
+        logger.debug("SingleStepping() called")
+        self.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_SINGLE_STEPPING, 0)
+        logger.debug("SingleStepping() returning")
