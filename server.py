@@ -10,7 +10,8 @@ import logging
 import select
 import serial
 import socket
-import struct
+import ctypes
+import xml.etree.ElementTree
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger()
@@ -82,60 +83,89 @@ registers = {
     'xmm15': udkserver.Register.SOFT_DEBUGGER_REGISTER_XMM15,
 }
 
-class UdkGdbServer(udkserver.UdkHostStub, gdbserver.GdbHostStub):
-    def __init__(self, serial_name = '/dev/cu.usbmodem1a141', host = '0.0.0.0', port = 1234):
-        self._serial_name = serial_name
-        self._serial = None
+class LoadedImageProtocol(ctypes.Structure):
+    _fields_ = [('revision', ctypes.c_uint32),
+                ('parent_handle', ctypes.c_uint64),
+                ('system_table', ctypes.c_uint64),
+                ('device_handle', ctypes.c_uint64),
+                ('file_path', ctypes.c_uint64),
+                ('reserved', ctypes.c_uint64),
+                ('load_options_size', ctypes.c_uint32),
+                ('load_options', ctypes.c_uint64),
+                ('image_base', ctypes.c_uint64),
+                ('image_size', ctypes.c_uint64),
+                ('image_code_type', ctypes.c_uint8),
+                ('image_data_type', ctypes.c_uint8),
+                ('image_unload', ctypes.c_uint64)]
 
-        self._host = host
-        self._port = port
-        self._socket = None
 
-        self._poll = select.poll()
-        self._poll_handlers = {}
+class PeCoffLoaderImageContext(ctypes.Structure):
+    _pdb_name = None
+    _fields_ = [('image_addr', ctypes.c_ulonglong),
+                ('image_size', ctypes.c_ulonglong),
+                ('destination_address', ctypes.c_ulonglong),
+                ('entrypoint', ctypes.c_ulonglong),
+                ('image_read', ctypes.c_ulonglong),
+                ('handle', ctypes.c_ulonglong),
+                ('fixup_data', ctypes.c_ulonglong),
+                ('section_alignment', ctypes.c_ulong),
+                ('pe_coff_header_offset', ctypes.c_ulong),
+                ('debug_directory_entry_rva', ctypes.c_ulong),
+                ('code_view', ctypes.c_ulonglong),
+                ('pdb_pointer', ctypes.c_ulonglong),
+                ('size_of_headers', ctypes.c_ulonglong),
+                ('image_code_memory_type', ctypes.c_ulong),
+                ('image_data_memory_type', ctypes.c_ulong),
+                ('image_error', ctypes.c_ulong),
+                ('fixup_data_size', ctypes.c_ulonglong),
+                ('machine', ctypes.c_ushort),
+                ('image_type', ctypes.c_ushort),
+                ('relocations_stripped', ctypes.c_bool),
+                ('is_te_image', ctypes.c_bool),
+                ('hii_resource_data', ctypes.c_uint64),
+                ]
 
-        self.udk = None
-        self.udk_extension_handlers = collections.defaultdict(dict)
+    @property
+    def pdb_name(self):
+        return self._pdb_name
 
-        self.gdb = None
+    @pdb_name.setter
+    def pdb_name(self, pdb_name):
+        self._pdb_name = pdb_name
 
-        ### Below here are instance parameters
-        self.fmodules = []
+class LoadedImagePrivateData(ctypes.Structure):
+    _fields_ = [('signature', ctypes.c_uint64),
+                ('handle', ctypes.c_uint64),
+                ('type', ctypes.c_uint64),
+                ('started', ctypes.c_uint8),
+                ('entrypoint', ctypes.c_uint64),
+                ('info', LoadedImageProtocol),
+                ('loaded_image_device_path', ctypes.c_uint64),
+                ('image_base_page', ctypes.c_uint64),
+                ('number_of_pages', ctypes.c_uint64),
+                ('fixup_data', ctypes.c_uint64),
+                ('tpl', ctypes.c_uint64),
+                ('status', ctypes.c_uint64),
+                ('exit_data_size', ctypes.c_uint64),
+                ('exit_data', ctypes.c_uint64),
+                ('jump_context', ctypes.c_uint64),
+                ('machine', ctypes.c_uint16),
+                ('ebc', ctypes.c_uint64),
+                ('runtime_data', ctypes.c_uint64),
+                ('image_context', PeCoffLoaderImageContext)]
 
-    def add_udk_extension_handlers(self, command, handler):
-        self.udk_extension_handlers[command] = handler
 
-    def add_poll_fd(self, fd, handler):
-        self._poll.register(fd, select.POLLIN)
-        self._poll_handlers[fd] = handler
 
-    def remove_poll_fd(self, fd):
-        self._poll.unregister(fd)
-        del self._poll_handlers[fd]
-
-    def start_serial(self):
-        ### Initialize the Serial port
-        self._serial = serial.Serial(self._serial_name)
-        self._serial.reset_input_buffer()
-        self._serial.reset_output_buffer()
-        self.udk = udkserver.Server(self, self._serial)
-
-        self.add_poll_fd(self._serial.fileno(), self.serial_handler)
-
-    def start_socket(self):
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._socket.bind((self._host, self._port))
-        self._socket.listen(0)
-        self.add_poll_fd(self._socket.fileno(), self.socket_handler)
-        logger.info("Listening on {}:{} for connections".format(self._host, self._port))
-
-    def socket_handler(self):
-        self.connection, self.remote_addr = self._socket.accept()
-        self.gdb = gdbserver.GdbRemoteSerialProtocol(self.connection.makefile('rwb', buffering = 0), self)
+class UdkGdbStub(gdbserver.GdbHostStub):
+    def __init__(self, rsp, udk):
+        super(UdkGdbStub, self).__init__(rsp)
+        self.udk = udk
 
         #### UDK Extensions
-        self.gdb.add_general_query_handler(b'UdkExtension', self.udk_extension)
+        self.udk_extension_handlers = collections.defaultdict(dict)
+        self.add_general_query_handler(b'UdkExtension', self.udk_extension)
+
+        #### General UDK Extensions
         self.add_udk_extension_handlers(b'arch', self.udk_extension_arch)
         self.add_udk_extension_handlers(b'checkexpat', self.udk_extension_checkexpat)
         self.add_udk_extension_handlers(b'exception', self.udk_extension_exception)
@@ -146,52 +176,34 @@ class UdkGdbServer(udkserver.UdkHostStub, gdbserver.GdbHostStub):
         self.add_udk_extension_handlers(b'fmodules', self.udk_extension_fmodules)
         self.add_udk_extension_handlers(b'smodules', self.udk_extension_smodules)
 
-        self.add_poll_fd(self.connection.fileno(), self.connection_handler)
-        logger.info("Received a connection from {}".format(self.remote_addr))
+        target = xml.etree.ElementTree.Element('target', version='1.0')
+        architecture = xml.etree.ElementTree.SubElement(target, 'architecture')
+        architecture.text = 'i386:x86-64'
+        target_xml = xml.etree.ElementTree.tostring(target, encoding='utf-8', method='xml')
 
-    def connection_handler(self):
-        self.gdb.command_communication()
-
-    def serial_handler(self):
-        self.udk.command_communication()
+        self.set_xml(b'features', b'target.xml', target_xml)
+        self.add_feature(b'qXfer:features:read')
 
 
     ##### GDB Target Stub Side
     ### Called by GDB to request the target continue execution
-    def continue_execution(self, address = None):
+    def continue_execution_impl(self, address = None):
         self.udk.go()
 
-    def step_instruction(self):
-        self.udk.single_stepping()
-
-    ### Called by GDB to request the target architecture
-    def get_architecture(self):
-        return 'i386:x86-64'
-
-    def get_libraries(self):
-        return self.fmodules
-
     ### Called by GDB to request the break cause from the target
-    def get_break_cause(self):
-        cause, stop_address = self.udk.break_cause()
-        nrs = {}
-#        if cause == udkserver.BreakCauses.DEBUG_DATA_BREAK_CAUSE_IMAGE_LOAD:
-#            nrs[b'library'] = b'0'
-        return (cause, nrs)
+    def halt_reason_impl(self):
+        return self.udk.handle_break_cause()
 
     ### Called by GDB to request memory from the target
-    def read_memory(self, address, size):
+    def read_memory_impl(self, address, size):
         return self.udk.read_memory(address, 1, size)
 
-    ### Called by GDB to request memory from the target
-    def write_memory(self, address, size, data):
-        return self.udk.write_memory(address, 1, size, data)
-
-    def read_register(self, register):
+    ### Called by GDB to request a single register from the target
+    def read_register_impl(self, register):
         return self.udk.read_register(registers[register])
 
     ### Called by GDB to read the register state from the target
-    def read_registers(self, defaults):
+    def read_registers_impl(self, defaults):
         registers = self.udk.read_registers()
         registers['rip'] = registers['eip']
         registers['fctrl'] = registers['fcw']
@@ -212,54 +224,65 @@ class UdkGdbServer(udkserver.UdkHostStub, gdbserver.GdbHostStub):
         return registers
 
     ### Called by GDB to halt the target from running
-    def send_break(self):
+    def send_break_impl(self):
         self.udk.halt()
-#        viewpoint = self.udk.get_viewpoint()
-        cause, stop_address = self.udk.break_cause()
-        return (cause, {})
+        return self.udk.handle_break_cause()
 
+    ### Called by GDB to request the target step a single instruction
+    def step_instruction_impl(self):
+        self.udk.single_stepping()
+        return self.udk.handle_break_cause()
+
+    ### Called by GDB to write memory on the target
+    def write_memory_impl(self, address, size, data):
+        return self.udk.write_memory(address, 1, size, data)
+
+    def write_register_impl(self, register_name, value):
+        return self.udk.write_register(registers[register_name], value)
 
     #### GDB Protocol Extensions for UDK
     ###
+    def add_udk_extension_handlers(self, command, handler):
+        self.udk_extension_handlers[command] = handler
+
     def udk_extension(self, args):
         cmd = args
         args = None
         if b':' in cmd:
             cmd, args = cmd.split(b':', 2)
 
-
-        if cmd in self.udk_extension_handlers:
+        try:
             self.udk_extension_handlers[cmd](args)
-        else:
+        except KeyError:
             self.gdb.send_packet(b'')
 
     def udk_extension_arch(self, args):
-        self.gdb.send_packet(b'use64')
+        self.rsp.send_packet(b'use64')
 
     def udk_extension_exception(self, args):
-        self.gdb.send_packet(b'')
+        self.rsp.send_packet(b'')
 
     def udk_extension_next_module(self):
         try:
-            first = next(self.fmodules_iter)
+            first = next(self.libraries_iter)
             msg = '0x{0:x};0x{1:x};{2}'.format(first.entrypoint, first.image_addr, first.pdb_name)
-            self.gdb.send_packet(msg.encode('utf-8'))
+            self.rsp.send_packet(msg.encode('utf-8'))
         except StopIteration:
-            self.gdb.send_packet(b'l')
+            self.rsp.send_packet(b'l')
             del self.fmodules_iter
 
     def udk_extension_fmodules(self, args):
-        self.fmodules_iter = iter(self.fmodules)
+        self.libraries_iter = iter(self.udk.libraries)
         self.udk_extension_next_module()
 
     def udk_extension_smodules(self, args):
         if not self.fmodules_iter:
-            self.gdb.send_packet(b'E99')
+            self.rsp.send_packet(b'E99')
 
         self.udk_extension_next_module()
 
     def udk_extension_symbol(self, args):
-        self.gdb.send_packet(b'E91')
+        self.rsp.send_packet(b'E91')
 
     def udk_extension_checkexpat(self, args):
         if args == b'start':
@@ -271,33 +294,136 @@ class UdkGdbServer(udkserver.UdkHostStub, gdbserver.GdbHostStub):
         self.udk.reset()
 
 
+class UdkStub(udkserver.UdkTargetStub):
+    def __init__(self, target, server):
+        super(UdkStub, self).__init__(target)
+        self.server = server
+        self.libraries = []
+        self.libraries_xml = xml.etree.ElementTree.Element('library-list')
+        self.gdb = None
+
+    def add_library(self, pdb_name, image_context):
+        self.libraries.append(image_context)
+
+        library = xml.etree.ElementTree.SubElement(self.libraries_xml, 'library', name = pdb_name)
+        xml.etree.ElementTree.SubElement(library, 'segment', address='0x{0:x}'.format(image_context.image_addr))
+        libraries_xml_str = xml.etree.ElementTree.tostring(self.libraries_xml, encoding='utf-8', method='xml')
+
+        if self.gdb:
+            self.gdb.set_xml(b'libraries', b'', libraries_xml_str)
+
+    def attach(self, gdb):
+        self.gdb = gdb
+
     ##### UDK Host Side
     ### Called by UDK Server when memory is ready on the target
-    def handle_memory_ready(self):
-        self.fmodules = []
-        if self._socket:
-            return
-        self.start_socket()
+    def handle_memory_ready_impl(self):
+        self.server.start_socket()
 
-    ### Called by UDK Server when a SW breakpoint occurs on the target
-    def handle_break_cause_sw_breakpoint(self, stop_address):
-        cause, stop_address = self.udk.break_cause()
-        self.gdb.send_stop_reply_packet(5)
+    ### Called by UDK Server when memory is ready on the target
+    def handle_break_point_impl(self):
+        (cause, nr) = self.handle_break_cause()
+        try:
+            self.gdb.rsp.send_stop_reply_packet(cause, nr)
+        except AttributeError:
+            pass
 
-    ### Called by UDK Server when an image load event occurs on the target
-    def handle_break_cause_image_load(self, pdb_name, image_context):
-        logger.info('module {0} loaded at address 0x{1:x} with size 0x{2:x}'.format(image_context.pdb_name, image_context.image_addr, image_context.image_size))
-        self.fmodules.append(image_context)
+    ### Called to generate a response when the target is stopped at a SW breakpoint
+    def handle_break_cause_sw_breakpoint_impl(self, stop_address):
+        return (5, {b'swbreak': b''})
 
-        if not self.gdb:
-            return
+    ### Called to generate a response when the target is stopped at a SW breakpoint
+    def handle_break_cause_hw_breakpoint_impl(self, stop_address):
+        return (5, {b'hwbreak': b''})
 
-        nrs = {b'library': b'0'}
-        self.gdb.send_stop_reply_packet(5, nrs)
+    ### Called to generate a response when the target is stopped due to image loading
+    def handle_break_cause_image_load_impl(self, pdb_name_addr, image_context_addr):
+        loaded_image_private_data_addr = image_context_addr - LoadedImagePrivateData.image_context.offset;
+        loaded_image_private_data_buffer = self.read_memory(loaded_image_private_data_addr, 1, 512)
+        loaded_image_private_data = LoadedImagePrivateData.from_buffer_copy(loaded_image_private_data_buffer)
+
+        image_context = loaded_image_private_data.image_context
+
+        logger.debug('signature: 0x{0:x}'.format(loaded_image_private_data.signature))
+        if loaded_image_private_data.signature == 0x6972646c:
+            logger.debug('EDK_LOADED_IMAGE_PRIVATE_DATA:')
+            logger.debug('signature: 0x{0:x} entrypoint: 0x{1:x}, image_base_page: 0x{2:x}, number_of_pages: 0x{3:x}'
+                .format(loaded_image_private_data.signature,
+                        loaded_image_private_data.entrypoint,
+                        loaded_image_private_data.image_base_page,
+                        loaded_image_private_data.number_of_pages))
+
+            logger.debug('EFI_LOADED_IMAGE_PROTOCOL:')
+            logger.debug('revision: 0x{0:x} image_base: 0x{1:x}, image_size: 0x{2:x}'
+                .format(loaded_image_private_data.info.revision,
+                        loaded_image_private_data.info.image_base,
+                        loaded_image_private_data.info.image_size))
+
+            if image_context.image_addr == 0x0:
+                image_context.image_addr = loaded_image_private_data.info.image_base
+
+            if image_context.image_size == 0x0:
+                image_context.image_size = loaded_image_private_data.info.image_size
+
+            if image_context.entrypoint == 0x0:
+                image_context.entrypoint = loaded_image_private_data.entrypoint
+
+        pdb_name = self.read_null_terminated_string(pdb_name_addr)
+        logger.info('module {0} loaded at address 0x{1:x} with size 0x{2:x}'.format(pdb_name, image_context.image_addr, image_context.image_size))
+        self.add_library(pdb_name, image_context)
+        return (5, {b'library': b''})
 
     ### Called by UDK Server when a SW breakpoint occurs on the target
     def handle_break_cause_exception(self, stop_addres, vector, data):
+        return (4, {})
         self.gdb.send_stop_reply_packet(vector)
+
+
+class UdkGdbServer():
+    def __init__(self, serial_name = '/dev/cu.usbmodem1a141', host = '0.0.0.0', port = 1234):
+        self._serial_name = serial_name
+        self._serial = None
+
+        self._host = host
+        self._port = port
+        self._socket = None
+
+        self._poll = select.poll()
+        self._poll_handlers = {}
+
+        self.udk = None
+        self.gdb = None
+
+    def add_poll_fd(self, fd, handler):
+        self._poll.register(fd, select.POLLIN)
+        self._poll_handlers[fd] = handler
+
+    def remove_poll_fd(self, fd):
+        self._poll.unregister(fd)
+        del self._poll_handlers[fd]
+
+    def start_serial(self):
+        ### Initialize the Serial port
+        self._serial = serial.Serial(self._serial_name)
+        self._serial.reset_input_buffer()
+        self._serial.reset_output_buffer()
+        self.udk = udkserver.UdkTarget(self._serial, UdkStub, self)
+        self.add_poll_fd(self._serial.fileno(), self.udk.command_communication)
+
+    def socket_handler(self):
+        self.connection, self.remote_addr = self._socket.accept()
+        self.gdb = gdbserver.GdbRemoteSerialProtocol(self.connection.makefile('rwb', buffering = 0), UdkGdbStub, self.udk.stub)
+        self.udk.stub.attach(self.gdb.stub)
+        self.add_poll_fd(self.connection.fileno(), self.gdb.command_communication)
+        logger.info("Received a connection from {}".format(self.remote_addr))
+
+    def start_socket(self):
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._socket.bind((self._host, self._port))
+        self._socket.listen(0)
+        self.add_poll_fd(self._socket.fileno(), self.socket_handler)
+        logger.info("Listening on {}:{} for connections".format(self._host, self._port))
 
     def run(self):
         self.start_serial()
@@ -316,7 +442,10 @@ class UdkGdbServer(udkserver.UdkHostStub, gdbserver.GdbHostStub):
                 if fd not in self._poll_handlers:
                     raise Exception("unknown fd raised poll event")
 
-                self._poll_handlers[fd]()
+                try:
+                    self._poll_handlers[fd]()
+                except udkserver.AbortError:
+                    pass
 
 if __name__ == "__main__":
     udk_gdb_server = UdkGdbServer()

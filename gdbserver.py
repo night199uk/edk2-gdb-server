@@ -3,7 +3,7 @@ import logging
 import collections
 import struct
 import binascii
-import xml.etree.ElementTree
+
 
 logger = logging.getLogger('gdbserver')
 logger.setLevel(logging.DEBUG)
@@ -100,73 +100,31 @@ class RemoteException(Exception):
     pass
 
 class GdbHostStub(object):
-    def get_architecture(self):
-        raise NotImplementedError("implement GdbHostStub and override get_architecture")
-
-    def get_break_cause(self):
-        raise NotImplementedError("implement GdbHostStub and override get_break_cause")
-
-    def get_features_xml(self, annex, offset, length):
-        if annex == b'target.xml':
-            target = xml.etree.ElementTree.Element('target', version='1.0')
-            architecture = xml.etree.ElementTree.SubElement(target, 'architecture')
-            architecture.text = self.get_architecture()
-            return xml.etree.ElementTree.tostring(target, encoding='utf-8', method='xml')
-
-        raise NotImplementedError('annex not defined')
-
-    def get_libraries_xml(self, annex, offset, length):
-        library_list = xml.etree.ElementTree.Element('library-list')
-        for lib in self.get_libraries():
-            library = xml.etree.ElementTree.SubElement(library_list, 'library', name=lib.pdb_name)
-            xml.etree.ElementTree.SubElement(library, 'segment', address='0x{0:x}'.format(lib.image_addr))
-        return xml.etree.ElementTree.tostring(library_list, encoding='utf-8', method='xml')
-
-    def read_registers(self):
-        raise NotImplementedError('implement GdbHostStub and override read_registers')
-
-    def read_memory(self, address, size):
-        raise NotImplementedError("implement GdbHostStub and override read_memory")
-
-    def write_memory(self, address, size):
-        raise NotImplementedError("implement GdbHostStub and override read_memory")
-
-    def send_break(self):
-        raise NotImplementedError("implement GdbHostStub and override send_break")
-
-    def continue_execution(self, address = None):
-        raise NotImplementedError("implement GdbHostStub and override continue_execution")
-
-    def step_instruction(self):
-        raise NotImplementedError("implement GdbHostStub and override step_instruction")
-
-
-class GdbRemoteSerialProtocol(object):
-    def __init__(self, connection, stub):
-        super(GdbRemoteSerialProtocol, self).__init__()
-        self.connection = connection
-
-        self.stub = stub
-        self.backlog = 1
+    def __init__(self, rsp):
+        super(GdbHostStub, self).__init__()
+        self.rsp = rsp
         self.initialized = False
-
         self.features = {
             b'multiprocess': False,
             b'xmlRegisters': True,
-            b'qRelocInsn': False
+            b'qRelocInsn': False,
+            b'swbreak': True,
+            b'hwbreak': True,
         }
 
+        self.xmls = collections.defaultdict(dict)
         self.packet_handlers = collections.defaultdict(int)
         self.general_query_xfer_handlers = collections.defaultdict(dict)
 
         #### Standard Packet Handlers
         self.add_packet_handler(b'!', self.extended_mode)
-        self.add_packet_handler(b'\x03', self.brk)
+        self.add_packet_handler(b'\x03', self.send_break)
         self.add_packet_handler(b'c', self.continue_execution)
         self.add_packet_handler(b'g', self.read_registers)
         self.add_packet_handler(b'm', self.read_memory)
         self.add_packet_handler(b'M', self.write_memory)
         self.add_packet_handler(b'p', self.read_register)
+        self.add_packet_handler(b'P', self.write_register)
         self.add_packet_handler(b's', self.step_instruction)
         self.add_packet_handler(b'?', self.halt_reason)
 
@@ -190,15 +148,11 @@ class GdbRemoteSerialProtocol(object):
         #### No ACK mode handler
         self.add_feature(b'QStartNoAckMode')
         self.add_general_set_handler(b'StartNoAckMode', self.general_set_start_no_ack_mode)
-        self.no_acknowledgement_mode = False
+        self.rsp.no_acknowledgement_mode = False
 
-        #### qXfer:features:read feature
-        self.add_feature(b'qXfer:features:read')
-        self.add_general_query_xfer_handler(b'features', b'read', self.general_query_xfer_features_read)
-
-        #### qXfer:libraries:read feature
-        self.add_feature(b'qXfer:libraries:read')
-        self.add_general_query_xfer_handler(b'libraries', b'read', self.general_query_xfer_libraries_read)
+        #### qXfer:object:read:annex:offset,length features
+        self.add_feature(b'qXfer:features:read', False)
+        self.add_feature(b'qXfer:libraries:read', False)
 
         #### Thread Info
         self.add_packet_handler(b'H', self.set_thread)
@@ -212,6 +166,7 @@ class GdbRemoteSerialProtocol(object):
 #        self.add_general_query_handler(b'TsV', self.general_query_trace_var_subsequent)
 #        self.add_general_query_handler(b'TfP', self.general_query_tracepoint_first)
 #        self.add_general_query_handler(b'TsP', self.general_query_tracepoint_subsequent)
+
 
     def add_feature(self, feature, value = True):
         self.features[feature] = value
@@ -231,6 +186,303 @@ class GdbRemoteSerialProtocol(object):
     def add_verbose_handler(self, cmd, handler):
         self.verbose_handlers[cmd] = handler
 
+    #### Top Level GDB Commands
+    ###
+    def continue_execution_impl(self, args):
+        raise NotImplementedError("implement GdbHostStub and override continue_execution")
+
+    def continue_execution(self, args):
+        """‘c [addr]’
+
+        Continue at addr, which is the address to resume. If addr is omitted, resume at current address.
+        This packet is deprecated for multi-threading support. See vCont packet.
+        Reply: See Stop Reply Packets, for the reply specifications."""
+        self.continue_execution_impl()
+
+    def extended_mode(self, args):
+        """‘!’
+
+        Enable extended mode. In extended mode, the remote server is made persistent. The ‘R’ packet is used to restart the program being debugged.
+        Reply:
+        ‘OK’
+        The remote target both supports and has enabled extended mode."""
+        self.rsp.send_packet(b'OK')
+
+    def halt_reason_impl(self):
+        raise NotImplementedError("implement GdbHostStub and override halt_reason_impl")
+
+    def halt_reason(self, args):
+        """‘?’
+
+        Indicate the reason the target halted. The reply is the same as for step and continue. This packet has a special interpretation when the target is in non-stop mode; see Remote Non-Stop.
+        Reply: See Stop Reply Packets, for the reply specifications."""
+        (cause, nr) = self.halt_reason_impl()
+        self.rsp.send_stop_reply_packet(cause, nr)
+
+    def read_memory_impl(self, address, size):
+        raise NotImplementedError("implement GdbHostStub and override read_memory_impl")
+
+    def read_memory(self, args):
+        addr, size = args.split(b',')
+        addr = int(addr, 16)
+        size = int(size, 16)
+
+        try:
+            data = self.read_memory_impl(addr, size)
+            self.rsp.send_packet(binascii.hexlify(data))
+        except:
+            self.rsp.send_packet(b'E99')
+
+    def read_register_impl(self, register_name):
+        raise NotImplementedError('implement GdbHostStub and override read_registers_impl')
+
+    def read_register(self, args):
+        index = int(args, 16)
+        if index is None:
+            self.rsp.send_packet(b'E00')
+            return
+
+        archdef = architectures['i386:x86-64']
+
+        register = archdef['registers'][index]
+        register_name = register['name']
+        register_size = register['size']
+
+        value = self.read_register_impl(register_name)
+
+        s = b''
+        if register_size == 4:
+            s = binascii.hexlify(struct.pack('<I', value))
+        elif register_size == 8:
+            s = binascii.hexlify(struct.pack('<Q', value))
+        elif register_size == 10:
+            s = binascii.hexlify(value)
+
+        self.rsp.send_packet(s)
+
+    def read_registers_impl(self):
+        raise NotImplementedError('implement GdbHostStub and override read_registers_impl')
+
+    def read_registers(self, args):
+        archdef = architectures['i386:x86-64']
+
+        defaults = {}
+        for register in archdef['registers']:
+            register_name = register['name']
+            defaults[register_name] = 0
+
+        values = self.read_registers_impl(defaults)
+
+        s = b''
+        for register in archdef['registers']:
+            register_name = register['name']
+            register_size = register['size']
+            if register_size == 4:
+                s += binascii.hexlify(struct.pack('<I', values[register_name]))
+            elif register_size == 8:
+                s += binascii.hexlify(struct.pack('<Q', values[register_name]))
+            elif register_size == 10:
+                s += binascii.hexlify(values[register_name])
+
+        self.rsp.send_packet(s)
+
+    def send_break_impl(self):
+        raise NotImplementedError("implement GdbHostStub and override send_break")
+
+    def send_break(self, args):
+        self.send_break_impl()
+
+    def set_thread(self, args):
+        self.rsp.send_packet(b'OK')
+
+    def step_instruction_impl(self):
+        raise NotImplementedError("implement GdbHostStub and override send_break")
+
+    def step_instruction(self, args):
+        """'s [addr]'
+
+        Single step, resuming at addr. If addr is omitted, resume at same address.
+        This packet is deprecated for multi-threading support. See vCont packet.
+        Reply: See Stop Reply Packets, for the reply specifications."""
+        (cause, nr) = self.step_instruction_impl()
+        self.rsp.send_stop_reply_packet(cause, nr)
+
+    def write_memory_impl(self, address, size):
+        raise NotImplementedError("implement GdbHostStub and override write_memory_impl")
+
+    def write_memory(self, args):
+        params, data = args.split(b':', 1)
+        addr, size = params.split(b',', 1)
+        addr = int(addr, 16)
+        size = int(size, 16)
+        data = binascii.unhexlify(data)
+
+        self.write_memory_impl(addr, size, data)
+        self.rsp.send_packet(b'OK')
+
+    def write_register_impl(self, register_name, value):
+        raise NotImplementedError("implement GdbHostStub and override write_memory_impl")
+
+    def write_register(self, args):
+        register, value = args.split(b'=', 2)
+        index = int(register, 16)
+
+        if index is None:
+            self.rsp.send_packet(b'E00')
+            return
+
+        archdef = architectures['i386:x86-64']
+
+        register = archdef['registers'][index]
+        register_name = register['name']
+        register_size = register['size']
+
+        s = 0
+        if register_size == 4:
+            s, = struct.unpack('<I', binascii.unhexlify(value))
+        elif register_size == 8:
+            s, = struct.unpack('<Q', binascii.unhexlify(value))
+        elif register_size == 16:
+            s = struct.unpack('<QQ', binascii.unhexlify(value))
+        elif register_size == 10:
+            s = binascii.unhexlify(value)
+
+        value = self.write_register_impl(register_name, s)
+        self.rsp.send_packet(b'OK')
+
+    #### Standard GDB Commands
+    ###
+    def general_query(self, query):
+        cmd = query
+        args = b''
+        if b':' in cmd:
+            cmd, args = query.split(b':', 1)
+
+        if cmd not in self.general_query_handlers:
+            logger.error('This subcommand %r is not implemented in q' % cmd)
+            self.rsp.send_packet(b'')
+            return
+
+        self.general_query_handlers[cmd](args)
+
+    def general_set(self, query):
+        cmd = query
+        args = b''
+        if b':' in cmd:
+            cmd, args = query.split(b':', 1)
+
+        if cmd not in self.general_set_handlers:
+            logger.error('This subcommand %r is not implemented in q' % cmd)
+            self.rsp.send_packet(b'')
+            return
+
+        self.general_set_handlers[cmd](args)
+
+    def verbose(self, query):
+        cmd = query
+        args = b''
+        if b';' in cmd:
+            cmd, args = query.split(b';', 1)
+
+        if cmd not in self.verbose_handlers:
+            logger.error('This subcommand %r is not implemented in v' % cmd)
+            self.rsp.send_packet(b'')
+            return
+
+        self.verbose_handlers[cmd](args)
+
+    #### General Query Handlers
+    def general_query_attached(self, args):
+        self.rsp.send_packet(b'1')
+
+    def general_query_current_thread(self, args):
+        self.rsp.send_packet(b'QC1')
+
+    def general_query_supported(self, args):
+        features = []
+        for feature, value in self.features.items():
+            if value == True:
+                features.append(b'%s+' % feature)
+            elif value == False:
+                features.append(b'%s-' % feature)
+            else:
+                features.append(b'%s=%x' % (feature, value))
+
+        self.rsp.send_packet(b';'.join(features))
+
+    def general_query_thread_info_first(self, args):
+        self.rsp.send_packet(b'l')
+
+    def general_query_thread_info_subsequent(self, args):
+        self.rsp.send_packet(b'')
+
+    #### XML Object transfer support
+    def set_xml(self, obj, annex, xml):
+        self.xmls[obj][annex] = xml
+
+    def general_query_xfer(self, args):
+        obj, operation, annex, offsetlength = args.split(b':', 4)
+        offset, length = offsetlength.split(b',', 2)
+        offset = int(offset, 16)
+        length = int(length, 16)
+
+        if operation == b'read':
+            xml = None
+            try:
+                packet = b'm'
+
+                xml = self.xmls[obj][annex]
+                if offset > len(xml):
+                    self.rsp.send_packet(b'l')
+                    return
+
+                end = offset + length
+                if end > len(xml):
+                    packet = b'l'
+                    end = len(xml)
+
+                self.rsp.send_packet(packet + xml[offset:end])
+            except KeyError:
+                self.rsp.send_packet(b'E02') # No such file or directory
+        else:
+            logger.error('requested xfer operation not supported: {}:{}'.format(obj, operation))
+            self.rsp.send_packet(b'')
+
+
+    #### Trace support
+    ### Trace variables not currently used
+    def general_query_trace_status(self, args):
+        self.rsp.send_packet(b'T0;tnotrun:0')
+
+    def general_query_trace_var_first(self, args):
+        self.rsp.send_packet(b'')
+
+    def general_query_trace_var_subsequent(self, args):
+        self.rsp.send_packet(b'')
+
+    def general_query_tracepoint_first(self, args):
+        self.rsp.send_packet(b'')
+
+    def general_query_tracepoint_subsequent(self, args):
+        self.rsp.send_packet(b'')
+
+    #### No Acknowledgement Mode Support
+    ###
+    def general_set_start_no_ack_mode(self, args):
+        self.rsp.no_acknowledgement_mode = True
+        self.rsp.send_packet(b'OK')
+        self.rsp.expect_ack() ## Soak up last ACK
+
+class GdbRemoteSerialProtocol(object):
+    def __init__(self, connection, clazz, *args, **kwargs):
+        super(GdbRemoteSerialProtocol, self).__init__()
+        self.stub = clazz(self, *args, **kwargs)
+        self.connection = connection
+        self.initialized = False
+
+    ####
+    #### Packet handling routines below
+    ####
     def command_communication(self):
         message = self.receive_packet()
         cmd, subcmd = message[0:1], message[1:]
@@ -244,248 +496,22 @@ class GdbRemoteSerialProtocol(object):
         if cmd == b'\x03':
             logger.debug('break received'.format(message))
 
-        if cmd not in self.packet_handlers:
+        if cmd not in self.stub.packet_handlers:
             logger.warning('{} command not handled'.format(message))
             self.send_packet(b'')
             return
 
-        self.packet_handlers[cmd](subcmd)
+        self.stub.packet_handlers[cmd](subcmd)
 
-    def general_query(self, query):
-        cmd = query
-        args = b''
-        if b':' in cmd:
-            cmd, args = query.split(b':', 1)
-
-        if cmd not in self.general_query_handlers:
-            logger.error('This subcommand %r is not implemented in q' % cmd)
-            self.send_packet(b'')
-            return
-
-        self.general_query_handlers[cmd](args)
-
-    def general_set(self, query):
-        cmd = query
-        args = b''
-        if b':' in cmd:
-            cmd, args = query.split(b':', 1)
-
-        if cmd not in self.general_set_handlers:
-            logger.error('This subcommand %r is not implemented in q' % cmd)
-            self.send_packet(b'')
-            return
-
-        self.general_set_handlers[cmd](args)
-
-    def verbose(self, query):
-        cmd = query
-        args = b''
-        if b';' in cmd:
-            cmd, args = query.split(b';', 1)
-
-        if cmd not in self.verbose_handlers:
-            logger.error('This subcommand %r is not implemented in v' % cmd)
-            self.send_packet(b'')
-            return
-
-        self.verbose_handlers[cmd](args)
-
-    def general_query_supported(self, args):
-        features = []
-        for feature, value in self.features.items():
-            if value == True:
-                features.append(b'%s+' % feature)
-            elif value == False:
-                features.append(b'%s-' % feature)
-            else:
-                features.append(b'%s=%x' % (feature, value))
-
-        self.send_packet(b';'.join(features))
-
-    def general_query_xfer(self, args):
-        obj, operation, remaining_args = args.split(b':', 2)
-        try:
-            function = self.general_query_xfer_handlers[obj][operation]
-            function(remaining_args)
-        except KeyError:
-            logger.error('requested xfer operation not supported: {}:{}'.format(obj, operation))
-            self.send_packet(b'')
-
-    #### XML Object transfer support
-    def general_query_xfer_features_read(self, args):
-        annex, offsetlength = args.split(b':', 2)
-        offset, length = offsetlength.split(b',', 2)
-        xml = None
-        try:
-            xml = self.stub.get_features_xml(annex, offset, length)
-            if xml is None:
-                self.send_packet(b'')
-            else:
-                self.send_packet(b'l' + xml)
-        except NotImplementedError:
-            self.send_packet(b'E00')
-
-    def general_query_xfer_libraries_read(self, args):
-        annex, offsetlength = args.split(b':', 2)
-        offset, length = offsetlength.split(b',', 2)
-        xml = None
-        try:
-            xml = self.stub.get_libraries_xml(annex, offset, length)
-            if xml is None:
-                self.send_packet(b'')
-            else:
-                self.send_packet(b'l' + xml)
-        except NotImplementedError:
-            self.send_packet(b'E00')
-
-    def general_query_attached(self, args):
-        self.send_packet(b'1')
-
-    def general_query_current_thread(self, args):
-        self.send_packet(b'QC1')
-
-    def general_query_thread_info_first(self, args):
-        self.send_packet(b'l')
-
-    def general_query_thread_info_subsequent(self, args):
-        self.send_packet(b'')
-
-    #### Trace support
-    ### Trace variables not currently used
-    def general_query_trace_status(self, args):
-        self.send_packet(b'T0;tnotrun:0')
-
-    def general_query_trace_var_first(self, args):
-        self.send_packet(b'')
-
-    def general_query_trace_var_subsequent(self, args):
-        self.send_packet(b'')
-
-    def general_query_tracepoint_first(self, args):
-        self.send_packet(b'')
-
-    def general_query_tracepoint_subsequent(self, args):
-        self.send_packet(b'')
-
-    def general_set_start_no_ack_mode(self, args):
-        self.no_acknowledgement_mode = True
-        self.send_packet(b'OK')
-        self.expect_ack() ## Soak up last ACK
-
-    #### Standard GDB Commands
-    ###
-    def brk(self, args):
-        (cause, nr) = self.stub.send_break()
-        self.send_stop_reply_packet(cause, nr)
-
-    def extended_mode(self, args):
-        self.send_packet(b'OK')
-
-    def set_thread(self, args):
-        self.send_packet(b'OK')
-
-    def halt_reason(self, args):
-        (cause, nr) = self.stub.get_break_cause()
-        self.send_stop_reply_packet(cause, nr)
-
-    def continue_execution(self, args):
-        if not args:
-            self.stub.continue_execution()
-
-    def read_register(self, args):
-        index = int(args, 16)
-        if index is None:
-            self.send_packet(b'E00')
-            return
-
-        arch = self.stub.get_architecture()
-        archdef = architectures[arch]
-
-        register = archdef['registers'][index]
-        register_name = register['name']
-        register_size = register['size']
-
-        value = self.stub.read_register(register_name)
-
-        s = b''
-        if register_size == 4:
-            s = binascii.hexlify(struct.pack('<I', value))
-        elif register_size == 8:
-            s = binascii.hexlify(struct.pack('<Q', value))
-        elif register_size == 10:
-            s = binascii.hexlify(value)
-
-        self.send_packet(s)
-
-    def read_registers(self, args):
-        arch = self.stub.get_architecture()
-        archdef = architectures[arch]
-
-        defaults = {}
-        for register in archdef['registers']:
-            register_name = register['name']
-            defaults[register_name] = 0
-
-        values = self.stub.read_registers(defaults)
-
-        s = b''
-        for register in archdef['registers']:
-            register_name = register['name']
-            register_size = register['size']
-            if register_size == 4:
-                s += binascii.hexlify(struct.pack('<I', values[register_name]))
-            elif register_size == 8:
-                s += binascii.hexlify(struct.pack('<Q', values[register_name]))
-            elif register_size == 10:
-                s += binascii.hexlify(values[register_name])
-
-        self.send_packet(s)
-
-    def read_memory(self, args):
-        addr, size = args.split(b',')
-        addr = int(addr, 16)
-        size = int(size, 16)
-
-        try:
-            data = self.stub.read_memory(addr, size)
-            self.send_packet(binascii.hexlify(data))
-        except:
-            self.send_packet(b'E99')
-
-    def write_memory(self, args):
-        params, data = args.split(b':', 1)
-        addr, size = params.split(b',', 1)
-        addr = int(addr, 16)
-        size = int(size, 16)
-        data = binascii.unhexlify(data)
-
-        self.stub.write_memory(addr, size, data)
-        self.send_packet(b'OK')
-
-    def step_instruction(self, args):
-        self.stub.step_instruction()
-        (cause, nr) = self.stub.get_break_cause()
-        self.send_stop_reply_packet(cause, nr)
-
-
-
-    def handle_k(self, cmd, subcmd):
-        pass
-
-
-
-    ####
-    #### Packet handling routines below
-    ####
     def receive_packet(self):
         c = self.connection.read(1)
         # Ack packet
         if c != b'+' and c != b'$' and c != b'-' and c != b'\x03':
-            raise RemoteException('Expected "$" received: "%s"' % str(c))
+            raise RemoteException('Expected "$" received: "{0!s}"'.format(c))
 
         message = b''
         if c == b'+' or c == b'-' or c == b'\x03':
-            message += c
+            message = c
 
         # Start of message
         elif c == b'$':
@@ -504,7 +530,7 @@ class GdbRemoteSerialProtocol(object):
             if checksum != self.calculate_checksum(message):
                 raise RemoteException('Wrong checksum {}'.format(checksum))
 
-            logger.debug('[GDB][RX] $%s#%02x' % (message.decode('utf-8'), checksum))
+            logger.debug('[GDB][RX] ${0!s}#{1:x}'.format(message.decode('utf-8'), checksum))
             self.send_ack()
 
         return message
@@ -529,7 +555,7 @@ class GdbRemoteSerialProtocol(object):
             self.expect_ack()
 
     def send(self, packet):
-        logger.debug('[GDB][TX] %s' % packet.decode('utf-8'))
+        logger.debug('[GDB][TX] {0!s}'.format(packet.decode('utf-8')))
         self.connection.write(packet)
         self.connection.flush()
 
@@ -539,7 +565,7 @@ class GdbRemoteSerialProtocol(object):
     def expect_ack(self):
         message = self.receive_packet()
         if message != b'+':
-            raise RemoteException('Wrong ack: "%s"' % str(message))
+            raise RemoteException('Wrong ack: "{}"'.format(str(message)))
 
     def calculate_checksum(self, pkt):
         sum = 0
@@ -584,5 +610,4 @@ class GdbRemoteSerialProtocol(object):
     def expect_signal(self):
         msg = self.__recv_msg()
         assert len(msg) == 3 and msg[0] == 'S', 'Expected "S", received "%c" % msg[0]'
-
         return int(msg[1:], 16)
