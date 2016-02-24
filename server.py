@@ -11,6 +11,7 @@ import select
 import serial
 import socket
 import ctypes
+import time
 import xml.etree.ElementTree
 
 logging.basicConfig(level=logging.DEBUG)
@@ -190,6 +191,13 @@ class UdkGdbStub(gdbserver.GdbHostStub):
     def continue_execution_impl(self, address = None):
         self.udk.go()
 
+    def continue_execution_with_signal_impl(self, signal, addr):
+        if signal == 9:
+            self.udk.reset()
+            return
+
+        self.udk.go()
+
     ### Called by GDB to request the break cause from the target
     def halt_reason_impl(self):
         return self.udk.handle_break_cause()
@@ -254,7 +262,7 @@ class UdkGdbStub(gdbserver.GdbHostStub):
         try:
             self.udk_extension_handlers[cmd](args)
         except KeyError:
-            self.gdb.send_packet(b'')
+            self.rsp.send_packet(b'')
 
     def udk_extension_arch(self, args):
         self.rsp.send_packet(b'use64')
@@ -265,18 +273,22 @@ class UdkGdbStub(gdbserver.GdbHostStub):
     def udk_extension_next_module(self):
         try:
             first = next(self.libraries_iter)
-            msg = '0x{0:x};0x{1:x};{2}'.format(first.entrypoint, first.image_addr, first.pdb_name)
+            msg = '0x{0:x};0x{1:x};{2}'.format(first['image_context'].entrypoint,
+                                               first['image_context'].image_addr,
+                                               first['pdb_name'])
             self.rsp.send_packet(msg.encode('utf-8'))
         except StopIteration:
             self.rsp.send_packet(b'l')
-            del self.fmodules_iter
+            del self.libraries_iter
+        except AttributeError:
+            self.rsp.send_packet(b'l')
 
     def udk_extension_fmodules(self, args):
         self.libraries_iter = iter(self.udk.libraries)
         self.udk_extension_next_module()
 
     def udk_extension_smodules(self, args):
-        if not self.fmodules_iter:
+        if not hasattr(self, 'libraries_iter'):
             self.rsp.send_packet(b'E99')
 
         self.udk_extension_next_module()
@@ -286,13 +298,22 @@ class UdkGdbStub(gdbserver.GdbHostStub):
 
     def udk_extension_checkexpat(self, args):
         if args == b'start':
-            self.gdb.send_packet(b'OK')
+            self.rsp.send_packet(b'OK')
         else:
-            self.gdb.send_packet(b'E91')
+            self.rsp.send_packet(b'E91')
 
     def udk_extension_resettarget(self, args):
         self.udk.reset()
+        self.udk.reset()
+        self.udk.reset()
+        self.rsp.send_packet(b'OK')
 
+        ## Absorb the continue from the target
+#        message = self.rsp.receive_packet()
+#        while not message.startswith(b'c') and not message.startswith(b'C'):
+#            print('{0!s}'.format(message))
+#            self.rsp.send_packet(b'')
+#            message = self.rsp.receive_packet()
 
 class UdkStub(udkserver.UdkTargetStub):
     def __init__(self, target, server):
@@ -303,7 +324,7 @@ class UdkStub(udkserver.UdkTargetStub):
         self.gdb = None
 
     def add_library(self, pdb_name, image_context):
-        self.libraries.append(image_context)
+        self.libraries.append({'pdb_name': pdb_name, 'image_context': image_context})
 
         library = xml.etree.ElementTree.SubElement(self.libraries_xml, 'library', name = pdb_name)
         xml.etree.ElementTree.SubElement(library, 'segment', address='0x{0:x}'.format(image_context.image_addr))
@@ -318,6 +339,8 @@ class UdkStub(udkserver.UdkTargetStub):
     ##### UDK Host Side
     ### Called by UDK Server when memory is ready on the target
     def handle_memory_ready_impl(self):
+        self.libraries = []
+        self.libraries_xml = xml.etree.ElementTree.Element('library-list')
         self.server.start_socket()
 
     ### Called by UDK Server when memory is ready on the target
@@ -373,10 +396,12 @@ class UdkStub(udkserver.UdkTargetStub):
         self.add_library(pdb_name, image_context)
         return (5, {b'library': b''})
 
+    def handle_break_cause_stepping_impl(self, stop_address):
+        return (5, {})
+
     ### Called by UDK Server when a SW breakpoint occurs on the target
-    def handle_break_cause_exception(self, stop_addres, vector, data):
+    def handle_break_cause_exception_impl(self, stop_addres, vector, data):
         return (4, {})
-        self.gdb.send_stop_reply_packet(vector)
 
 
 class UdkGdbServer():
@@ -432,7 +457,7 @@ class UdkGdbServer():
             for (fd, event) in self._poll.poll():
                 if event & (select.POLLHUP | select.POLLERR | select.POLLNVAL):
                     self.remove_poll_fd(fd)
-                    del self.connection
+                    self.gdb = None
                     continue
 
                 elif not event & select.POLLIN:

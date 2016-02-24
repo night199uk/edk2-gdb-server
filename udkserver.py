@@ -346,7 +346,7 @@ class UdkTargetStub(object):
         self.break_cause_handlers = {}
 #        self.add_break_cause_handler(BreakCauses.DEBUG_DATA_BREAK_CAUSE_UNKNOWN, self.handle_break_cause_unknown)
         self.add_break_cause_handler(BreakCauses.DEBUG_DATA_BREAK_CAUSE_HW_BREAKPOINT, self.handle_break_cause_hw_breakpoint)
-#        self.add_break_cause_handler(BreakCauses.DEBUG_DATA_BREAK_CAUSE_STEPPING, self.handle_break_cause_stepping)
+        self.add_break_cause_handler(BreakCauses.DEBUG_DATA_BREAK_CAUSE_STEPPING, self.handle_break_cause_stepping)
         self.add_break_cause_handler(BreakCauses.DEBUG_DATA_BREAK_CAUSE_SW_BREAKPOINT, self.handle_break_cause_sw_breakpoint)
 #        self.add_break_cause_handler(BreakCauses.DEBUG_DATA_BREAK_CAUSE_USER_HALT, self.handle_break_cause_user_halt)
         self.add_break_cause_handler(BreakCauses.DEBUG_DATA_BREAK_CAUSE_IMAGE_LOAD, self.handle_break_cause_image_load)
@@ -389,7 +389,11 @@ class UdkTargetStub(object):
     def handle_break_cause(self):
         self.get_viewpoint()
         cause, stop_address = self.break_cause()
-        return self.break_cause_handlers[cause](stop_address)
+        try:
+            value = self.break_cause_handlers[cause](stop_address)
+            return value
+        except KeyError:
+            return (5, {})
 
     def handle_break_cause_image_load_impl(self, pdb_name, image_context):
         raise NotImplementedError("implement UdkHostStub and override handle_break_cause_image_load")
@@ -418,6 +422,12 @@ class UdkTargetStub(object):
         vector, data, = self.get_exception()
         return self.handle_break_cause_exception_impl(stop_address, vector, data)
 
+    def handle_break_cause_stepping_impl(self, stop_address):
+        raise NotImplementedError("implement UdkHostStub and override handle_break_cause_image_load")
+
+    def handle_break_cause_stepping(self, stop_address):
+        return self.handle_break_cause_stepping_impl(stop_address)
+
     #### Commands which send no response data
     def halt(self):
         logger.debug("Halt() called")
@@ -425,9 +435,9 @@ class UdkTargetStub(object):
         logger.debug("Halt() returning")
 
     def reset(self):
-        logger.debug("Halt() called")
+        logger.debug("Reset() called")
         self.target.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_RESET, 0)
-        logger.debug("Halt() returning")
+        logger.debug("Reset() returning")
 
     def go(self):
         logger.debug("IGo() called")
@@ -641,7 +651,7 @@ class UdkTargetStub(object):
 class UdkTarget(object):
     def __init__(self, connection, clazz, *args, **kwargs):
         self.seqno = 1
-        self.target_seqno = -1
+        self.target_seqno = 0
         self.last_ack = 0
         self.msg = bytearray()
 
@@ -658,25 +668,27 @@ class UdkTarget(object):
         if packet is None:
             return
 
-        if not packet.is_request():
+        if packet.is_response():
             return
 
         logger.debug("Request {} sequence {}".format(packet.command, packet.seqno))
         if packet.command == DebugCommands.DEBUG_COMMAND_INIT_BREAK:
             self.seqno = 1
             self.target_seqno = 0
+#        elif packet.command == DebugCommands.DEBUG_COMMAND_OK or packet.command == DebugCommands.DEBUG_COMMAND_IN_PROGRESS:
+#            self.target_seqno = packet.seqno
         elif packet.seqno == self.target_seqno:
             logger.warning("TARGET: received one old command [{}] against command [{}]".format(packet.command, packet.seqno))
-            self.target.send_ack_packet(self.last_ack, packet.seqno)
+            self.send_ack_packet(self.last_ack, packet.seqno)
             return
         elif packet.seqno == (self.target_seqno + 1) % 256:
-            self.target_seqno = (self.target_seqno + 1) % 256
+            self.target_seqno = packet.seqno
         else:
-            logger.warning("Receive one invalid command [{}] against command[{}]".format(packet.seqno, self.target_seqno))
+            logger.warning("Receive one invalid command [seqno: 0x{:x}] against command[target_seqno: 0x{:x}]".format(packet.seqno, self.target_seqno))
             return
 
+        self.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, packet.seqno)
         if packet.command in self.stub.handlers:
-            self.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, packet.seqno)
             self.stub.handlers[packet.command](packet)
 
     def receive_packet(self, timeout = PACKET_READ_TIMEOUT, wait = True):
@@ -791,7 +803,7 @@ class UdkTarget(object):
                         self.seqno = (self.seqno + 1) % 256
                         break
                     else:
-                        raise UdkError("unknown packet type {} or unexpected sequence number {}".format(additional.command, additional.seqno))
+                        raise UdkError("unknown packet type 0x{x} or unexpected sequence number 0x{x}".format(additional.command, additional.seqno))
                 return packet
 
 

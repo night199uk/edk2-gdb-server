@@ -3,7 +3,7 @@ import logging
 import collections
 import struct
 import binascii
-
+import enum
 
 logger = logging.getLogger('gdbserver')
 logger.setLevel(logging.DEBUG)
@@ -23,6 +23,12 @@ GDB_SIGNAL_BUS = 10
 GDB_SIGNAL_SEGV = 11
 GDB_SIGNAL_SYS = 12
 GDB_SIGNAL_PIPE = 13
+
+class BreakPointState(enum.IntEnum):
+    BP_UNDEFINED    =    0x00
+    BP_SET          =    0x01
+    BP_ACTIVE       =    0x02
+    BP_REMOVED      =    0x03
 
 #### This should be generated from the packaged gdb xmls eventually
 # can be viewed in a running gdb with maint remote-registers
@@ -112,6 +118,7 @@ class GdbHostStub(object):
             b'hwbreak': True,
         }
 
+        self.breakpoints = []
         self.xmls = collections.defaultdict(dict)
         self.packet_handlers = collections.defaultdict(int)
         self.general_query_xfer_handlers = collections.defaultdict(dict)
@@ -120,6 +127,7 @@ class GdbHostStub(object):
         self.add_packet_handler(b'!', self.extended_mode)
         self.add_packet_handler(b'\x03', self.send_break)
         self.add_packet_handler(b'c', self.continue_execution)
+        self.add_packet_handler(b'C', self.continue_execution_with_signal)
         self.add_packet_handler(b'g', self.read_registers)
         self.add_packet_handler(b'm', self.read_memory)
         self.add_packet_handler(b'M', self.write_memory)
@@ -188,6 +196,58 @@ class GdbHostStub(object):
 
     #### Top Level GDB Commands
     ###
+    def insert_breakpoint(self, args):
+        """Insert (‘Z0’) or remove (‘z0’) a memory breakpoint at address addr of type kind.
+        A memory breakpoint is implemented by replacing the instruction at addr with a software
+        breakpoint or trap instruction. The kind is target-specific and typically indicates the
+        size of the breakpoint in bytes that should be inserted. E.g., the arm and mips can
+        insert either a 2 or 4 byte breakpoint. Some architectures have additional meanings
+        for kind; cond_list is an optional list of conditional expressions in bytecode form
+        that should be evaluated on the target's side. These are the conditions that should
+        be taken into consideration when deciding if the breakpoint trigger should be
+        reported back to GDBN.
+
+        See also the ‘swbreak’ stop reason (see swbreak stop reason) for how to best report a
+        breakpoint event to gdb.
+
+        The cond_list parameter is comprised of a series of expressions, concatenated without
+        separators. Each expression has the following form:
+
+        ‘X len,expr’
+        len is the length of the bytecode expression and expr is the actual conditional expression
+        in bytecode form. The optional cmd_list parameter introduces commands that may be run on
+        the target, rather than being reported back to gdb. The parameter starts with a numeric
+        flag persist; if the flag is nonzero, then the breakpoint may remain active and the
+        commands continue to be run even when gdb disconnects from the target.
+        Following this flag is a series of expressions concatenated with no separators.
+        Each expression has the following form:
+
+        ‘X len,expr’
+        len is the length of the bytecode expression and expr is the actual conditional expression in bytecode form.
+        see Architecture-Specific Protocol Details.
+
+        Implementation note: It is possible for a target to copy or move code that contains memory
+        breakpoints (e.g., when implementing overlays). The behavior of this packet, in the presence
+        of such a target, is not defined.
+
+        Reply:
+        ‘OK’
+        success
+        ‘’
+        not supported
+        ‘E NN’
+        for an error"""
+        params, cond_list, cmd_list = args.split(b';')
+        index, addr, kind = params.split(b',')
+        index = int(index, 10)
+        addr = int(addr, 16)
+        self.breakpoints.append({'address': addr,
+                                 'state': BreakPointState.BP_SET,
+                                 'first_byte': None})
+
+    def remove_breakpoint(self, args):
+        pass
+
     def continue_execution_impl(self, args):
         raise NotImplementedError("implement GdbHostStub and override continue_execution")
 
@@ -198,6 +258,25 @@ class GdbHostStub(object):
         This packet is deprecated for multi-threading support. See vCont packet.
         Reply: See Stop Reply Packets, for the reply specifications."""
         self.continue_execution_impl()
+
+    def continue_execution_with_signal_impl(self, sig, addr):
+        raise NotImplementedError("implement GdbHostStub and override continue_execution")
+
+    def continue_execution_with_signal(self, args):
+        """‘C sig[;addr]’
+
+        Continue with signal sig (hex signal number). If ‘;addr’ is omitted, resume at same address.
+        This packet is deprecated for multi-threading support. See vCont packet.
+
+        Reply: See Stop Reply Packets, for the reply specifications."""
+        sig = args
+        addr = None
+        if b';' in sig:
+            sig, addr = args.split(b';')
+            addr = int(addr, 16)
+
+        sig = int(sig, 16)
+        self.continue_execution_with_signal_impl(sig, addr)
 
     def extended_mode(self, args):
         """‘!’
@@ -290,7 +369,8 @@ class GdbHostStub(object):
         raise NotImplementedError("implement GdbHostStub and override send_break")
 
     def send_break(self, args):
-        self.send_break_impl()
+        (cause, nr) = self.send_break_impl()
+        self.rsp.send_stop_reply_packet(cause, nr)
 
     def set_thread(self, args):
         self.rsp.send_packet(b'OK')

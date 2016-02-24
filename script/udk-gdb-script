@@ -26,7 +26,7 @@ set disassemble-next-line auto
 set step-mode on
 set disassembly-flavor intel
 set height 0
-set prompt (udb) 
+#set prompt (udb) 
 
 define hook-stop
   stop-handler
@@ -42,13 +42,13 @@ import re
 import gdb
 import traceback
 import datetime
+import inspect
 
 #
 # Update the Python path (Below strings will be modified during installation to reflect the actual installation directory).
 #
 
-script_path = os.path.realpath(sys.argv[0])
-print(str(script_path))
+script_path = sys.argv[0]
 if script_path not in sys.path:
 	sys.path.insert(0, script_path)
 	sys.path.insert(0, script_path + '/py')
@@ -420,13 +420,15 @@ class Edk2ResetTarget(gdb.Command):
         if args == None:
             return
 
-        response = UdkCommandHelper.sendUdkExtensionPacket("resettarget")
-        if response != "OK":
-            print(FAILED_TO_EXECUTE_COMMAND % response)
-        else:
-            print(TARGET_IS_RUNNING_AFTER_RESET)
-            for line in UdkCommandHelper.executeCommand("c"):
-                print(line)
+        for line in UdkCommandHelper.executeCommand("signal SIGKILL"):
+            print(line)
+#        response = UdkCommandHelper.sendUdkExtensionPacket("resettarget")
+#        if response != "OK":
+#            print(FAILED_TO_EXECUTE_COMMAND % response)
+#        else:
+#            print(TARGET_IS_RUNNING_AFTER_RESET)
+#            for line in UdkCommandHelper.executeCommand("c"):
+#                print(line)
 Edk2ResetTarget()
 
 class Edk2ResetDelay(gdb.Command):
