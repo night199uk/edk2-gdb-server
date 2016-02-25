@@ -8,6 +8,7 @@ Entering any line of input at the terminal will exit the server.
 import logging
 import struct
 import enum
+import binascii
 
 logger = logging.getLogger('udkserver')
 logger.setLevel(logging.DEBUG)
@@ -275,10 +276,11 @@ class Packet(object):
     @classmethod
     def from_bytes(cls, data):
         starting_symbol, command, length, seqno, crc = struct.unpack("<BBBBH", data[0:6])
-        if crc != cls.calculate_crc16(data[0:4] + b'\x00\x00' + data[6:]):
+        if crc != cls.calculate_crc16(data[0:4] + b'\x00\x00' + data[6:length]):
+            logger.debug(str(binascii.hexlify(data)))
             raise CrcError(crc)
 
-        data = data[6:]
+        data = data[6:length]
         if length != len(data) + 6:
             raise UdkError("lengths do not match: {} and {}".format(length, len(data)))
 
@@ -563,7 +565,7 @@ class UdkTargetStub(object):
             value1, value2, = struct.unpack("<QQ", response.data)
             value = (value1 << 64) | value2
 
-        logger.debug("ReadRegister() returning : Register {} Value = {}".format(register.name, value))
+        logger.debug("ReadRegister() returning : Register {0} Value = 0x{1:x}".format(register.name, value))
         return value
 
     def read_registers(self):
@@ -675,8 +677,6 @@ class UdkTarget(object):
         if packet.command == DebugCommands.DEBUG_COMMAND_INIT_BREAK:
             self.seqno = 1
             self.target_seqno = 0
-#        elif packet.command == DebugCommands.DEBUG_COMMAND_OK or packet.command == DebugCommands.DEBUG_COMMAND_IN_PROGRESS:
-#            self.target_seqno = packet.seqno
         elif packet.seqno == self.target_seqno:
             logger.warning("TARGET: received one old command [{}] against command [{}]".format(packet.command, packet.seqno))
             self.send_ack_packet(self.last_ack, packet.seqno)
@@ -736,7 +736,7 @@ class UdkTarget(object):
 
             ### Ergh, these can come anywhere in the flow - output them and carry on
             if packet.command == DebugCommands.DEBUG_COMMAND_PRINT_MESSAGE:
-                logger.debug("target: {}".format(packet.data.decode('utf-8').strip()))
+#                logger.debug("target: {}".format(packet.data.decode('utf-8').strip()))
                 continue
 
             packet.dump(False)

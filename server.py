@@ -186,9 +186,32 @@ class UdkGdbStub(gdbserver.GdbHostStub):
         self.add_feature(b'qXfer:features:read')
 
 
+    def ensure_breakpoints(self):
+        for i, breakpoint in enumerate(self.breakpoints):
+            if breakpoint.state == gdbserver.BreakpointState.BP_SET:
+                first_byte = self.udk.read_memory(breakpoint.address, 1, 1)
+                if first_byte != b'\xcc':
+                    breakpoint.first_byte = first_byte
+
+                breakpoint.state = gdbserver.BreakpointState.BP_ACTIVE
+                self.udk.write_memory(breakpoint.address, 1, 1, b'\xcc')
+            elif breakpoint.state == gdbserver.BreakpointState.BP_ACTIVE:
+                first_byte = self.udk.read_memory(breakpoint.address, 1, 1)
+                if first_byte != b'\xcc':
+                    logger.debug("breakpoint marked active but no deployed")
+            elif breakpoint.state == gdbserver.BreakpointState.BP_REMOVED:
+                first_byte = self.udk.read_memory(breakpoint.address, 1, 1)
+                if first_byte != b'\xcc':
+                    logger.debug("breakpoint marked removed but not active")
+                    continue
+                logger.debug("deleting breakpoint now")
+                self.udk.write_memory(breakpoint.address, 1, 1, breakpoint.first_byte)
+                del self.breakpoints[i]
+
     ##### GDB Target Stub Side
     ### Called by GDB to request the target continue execution
     def continue_execution_impl(self, address = None):
+        self.ensure_breakpoints()
         self.udk.go()
 
     def continue_execution_with_signal_impl(self, signal, addr):
@@ -196,11 +219,30 @@ class UdkGdbStub(gdbserver.GdbHostStub):
             self.udk.reset()
             return
 
+        self.ensure_breakpoints()
         self.udk.go()
 
     ### Called by GDB to request the break cause from the target
     def halt_reason_impl(self):
         return self.udk.handle_break_cause()
+
+    def insert_breakpoint_impl(self, index, address, kind):
+        logger.debug("adding breakpoint {}".format(address))
+        for breakpoint in self.breakpoints:
+            if breakpoint.address == address:
+                return
+        breakpoint = gdbserver.Breakpoint(address)
+        breakpoint.state = gdbserver.BreakpointState.BP_SET
+        self.breakpoints.append(breakpoint)
+
+    def remove_breakpoint_impl(self, index, address, kind):
+        logger.debug("removing breakpoint {0!r}".format(address))
+        for breakpoint in self.breakpoints:
+            logger.debug("trying to remove breakpoint {0!r}".format(breakpoint.address))
+            if breakpoint.address == address:
+                logger.debug("setting breakpoint to removed {}".format(breakpoint.address))
+                breakpoint.state = gdbserver.BreakpointState.BP_REMOVED
+        self.ensure_breakpoints()
 
     ### Called by GDB to request memory from the target
     def read_memory_impl(self, address, size):
@@ -238,8 +280,19 @@ class UdkGdbStub(gdbserver.GdbHostStub):
 
     ### Called by GDB to request the target step a single instruction
     def step_instruction_impl(self):
+        self.ensure_breakpoints()
         self.udk.single_stepping()
         return self.udk.handle_break_cause()
+
+    ### Called by GDB to request the target step a single instruction
+    def step_instruction_with_signal_impl(self, signal, addr):
+        if signal == 9:
+            self.udk.reset()
+        self.ensure_breakpoints()
+        self.udk.single_stepping()
+#            return self.udk.handle_break_cause()
+#        self.udk.single_stepping()
+#        return self.udk.handle_break_cause()
 
     ### Called by GDB to write memory on the target
     def write_memory_impl(self, address, size, data):

@@ -9,26 +9,33 @@ logger = logging.getLogger('gdbserver')
 logger.setLevel(logging.DEBUG)
 
 #### This should be generated from the gdb signals.def
-GDB_SIGNAL_0 = 0
-GDB_SIGNAL_HUP = 1
-GDB_SIGNAL_INT = 2
-GDB_SIGNAL_QUIT = 3
-GDB_SIGNAL_ILL = 4
-GDB_SIGNAL_TRAP = 5
-GDB_SIGNAL_ABRT = 6
-GDB_SIGNAL_EMT = 7
-GDB_SIGNAL_FPE = 8
-GDB_SIGNAL_KILL = 9
-GDB_SIGNAL_BUS = 10
-GDB_SIGNAL_SEGV = 11
-GDB_SIGNAL_SYS = 12
-GDB_SIGNAL_PIPE = 13
+class Signals(enum.IntEnum):
+    GDB_SIGNAL_0 = 0
+    GDB_SIGNAL_HUP = 1
+    GDB_SIGNAL_INT = 2
+    GDB_SIGNAL_QUIT = 3
+    GDB_SIGNAL_ILL = 4
+    GDB_SIGNAL_TRAP = 5
+    GDB_SIGNAL_ABRT = 6
+    GDB_SIGNAL_EMT = 7
+    GDB_SIGNAL_FPE = 8
+    GDB_SIGNAL_KILL = 9
+    GDB_SIGNAL_BUS = 10
+    GDB_SIGNAL_SEGV = 11
+    GDB_SIGNAL_SYS = 12
+    GDB_SIGNAL_PIPE = 13
 
-class BreakPointState(enum.IntEnum):
+class BreakpointState(enum.IntEnum):
     BP_UNDEFINED    =    0x00
     BP_SET          =    0x01
     BP_ACTIVE       =    0x02
     BP_REMOVED      =    0x03
+
+class Breakpoint:
+    def __init__(self, address):
+        self.state = BreakpointState.BP_UNDEFINED
+        self.address = address
+        self.first_byte = None
 
 #### This should be generated from the packaged gdb xmls eventually
 # can be viewed in a running gdb with maint remote-registers
@@ -119,7 +126,6 @@ class GdbHostStub(object):
         }
 
         self.breakpoints = []
-        self.xmls = collections.defaultdict(dict)
         self.packet_handlers = collections.defaultdict(int)
         self.general_query_xfer_handlers = collections.defaultdict(dict)
 
@@ -134,6 +140,9 @@ class GdbHostStub(object):
         self.add_packet_handler(b'p', self.read_register)
         self.add_packet_handler(b'P', self.write_register)
         self.add_packet_handler(b's', self.step_instruction)
+        self.add_packet_handler(b'S', self.step_instruction_with_signal)
+        self.add_packet_handler(b'Z', self.insert_breakpoint)
+        self.add_packet_handler(b'z', self.remove_breakpoint)
         self.add_packet_handler(b'?', self.halt_reason)
 
         #### General Query
@@ -151,7 +160,6 @@ class GdbHostStub(object):
         #### Standard General Queries
         self.add_general_query_handler(b'Supported', self.general_query_supported)
         self.add_general_query_handler(b'Attached', self.general_query_attached)
-        self.add_general_query_handler(b'Xfer', self.general_query_xfer)
 
         #### No ACK mode handler
         self.add_feature(b'QStartNoAckMode')
@@ -159,8 +167,10 @@ class GdbHostStub(object):
         self.rsp.no_acknowledgement_mode = False
 
         #### qXfer:object:read:annex:offset,length features
+        self.xmls = collections.defaultdict(dict)
         self.add_feature(b'qXfer:features:read', False)
         self.add_feature(b'qXfer:libraries:read', False)
+        self.add_general_query_handler(b'Xfer', self.general_query_xfer)
 
         #### Thread Info
         self.add_packet_handler(b'H', self.set_thread)
@@ -196,8 +206,20 @@ class GdbHostStub(object):
 
     #### Top Level GDB Commands
     ###
+
+    def find_breakpoint(self, addr):
+        for i, d in enumerate(self.breakpoints):
+            if d['addr'] == addr:
+                return i
+        raise ValueError('breakpoint not found with address')
+
+    def insert_breakpoint_impl(self, index, addr, kind):
+        raise NotImplementedError("implement GdbHostStub and override insert_breakpoint_impl")
+
     def insert_breakpoint(self, args):
-        """Insert (‘Z0’) or remove (‘z0’) a memory breakpoint at address addr of type kind.
+        """‘z0,addr,kind’
+           ‘Z0,addr,kind[;cond_list...][;cmds:persist,cmd_list...]’
+        Insert (‘Z0’) or remove (‘z0’) a memory breakpoint at address addr of type kind.
         A memory breakpoint is implemented by replacing the instruction at addr with a software
         breakpoint or trap instruction. The kind is target-specific and typically indicates the
         size of the breakpoint in bytes that should be inserted. E.g., the arm and mips can
@@ -237,16 +259,25 @@ class GdbHostStub(object):
         not supported
         ‘E NN’
         for an error"""
-        params, cond_list, cmd_list = args.split(b';')
+        params = args
+        if b';' in args:
+            params, cond_list, cmd_list = args.split(b';')
+
         index, addr, kind = params.split(b',')
         index = int(index, 10)
         addr = int(addr, 16)
-        self.breakpoints.append({'address': addr,
-                                 'state': BreakPointState.BP_SET,
-                                 'first_byte': None})
+        self.insert_breakpoint_impl(index, addr, kind)
+        self.rsp.send_packet(b'OK')
+
+    def remove_breakpoint_impl(self, index, addr, kind):
+        raise NotImplementedError("implement GdbHostStub and override remove_breakpoint_impl")
 
     def remove_breakpoint(self, args):
-        pass
+        index, addr, kind = args.split(b',')
+        index = int(index, 10)
+        addr = int(addr, 16)
+        self.remove_breakpoint_impl(index, addr, kind)
+        self.rsp.send_packet(b'OK')
 
     def continue_execution_impl(self, args):
         raise NotImplementedError("implement GdbHostStub and override continue_execution")
@@ -386,6 +417,18 @@ class GdbHostStub(object):
         Reply: See Stop Reply Packets, for the reply specifications."""
         (cause, nr) = self.step_instruction_impl()
         self.rsp.send_stop_reply_packet(cause, nr)
+
+    def step_instruction_with_signal_impl(self):
+        raise NotImplementedError("implement GdbHostStub and override send_break")
+
+    def step_instruction_with_signal(self, args):
+        """‘S sig[;addr]’
+        Step with signal. This is analogous to the ‘C’ packet, but requests a single-step, rather than a normal resumption of execution.
+        This packet is deprecated for multi-threading support. See vCont packet.
+
+        Reply: See Stop Reply Packets, for the reply specifications."""
+        self.step_instruction_with_signal_impl()
+#        self.rsp.send_stop_reply_packet(cause, nr)
 
     def write_memory_impl(self, address, size):
         raise NotImplementedError("implement GdbHostStub and override write_memory_impl")
