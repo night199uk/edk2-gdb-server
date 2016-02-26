@@ -182,7 +182,11 @@ class UdkGdbStub(gdbserver.GdbHostStub):
         target_xml = xml.etree.ElementTree.tostring(target, encoding='utf-8', method='xml')
 
         self.set_xml(b'features', b'target.xml', target_xml)
-        self.add_feature(b'qXfer:features:read')
+        self.add_feature(b'qXfer:features:read', True)
+
+
+        #
+        self.add_feature(b'qXfer:libraries:read', True)
 
 
     def ensure_breakpoints(self):
@@ -361,6 +365,9 @@ class UdkStub(udkserver.UdkTargetStub):
         self.gdb = None
 
     def add_library(self, pdb_name, image_context):
+        if not pdb_name.endswith('.dll'):
+            pdb_name += '.dll'
+
         self.libraries.append({'pdb_name': pdb_name, 'image_context': image_context})
 
         library = xml.etree.ElementTree.SubElement(self.libraries_xml, 'library', name = pdb_name)
