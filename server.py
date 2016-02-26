@@ -239,11 +239,8 @@ class UdkGdbStub(gdbserver.GdbHostStub):
         self.breakpoints.append(breakpoint)
 
     def remove_breakpoint_impl(self, index, address, kind):
-        logger.debug("removing breakpoint {0!r}".format(address))
         for breakpoint in self.breakpoints:
-            logger.debug("trying to remove breakpoint {0!r}".format(breakpoint.address))
             if breakpoint.address == address:
-                logger.debug("setting breakpoint to removed {}".format(breakpoint.address))
                 breakpoint.state = gdbserver.BreakpointState.BP_REMOVED
         self.ensure_breakpoints()
 
