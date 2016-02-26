@@ -732,7 +732,11 @@ class UdkTarget(object):
                 continue
 
             data = data + self.connection.read(length - 3)
-            packet = Packet.from_bytes(data)
+            try:
+                packet = Packet.from_bytes(data)
+            except CrcError:
+                packet.dump(False)
+                continue
 
             ### Ergh, these can come anywhere in the flow - output them and carry on
             if packet.command == DebugCommands.DEBUG_COMMAND_PRINT_MESSAGE:
