@@ -171,7 +171,6 @@ class UdkGdbStub(gdbserver.GdbHostStub):
         self.add_udk_extension_handlers(b'checkexpat', self.udk_extension_checkexpat)
         self.add_udk_extension_handlers(b'exception', self.udk_extension_exception)
         self.add_udk_extension_handlers(b'symbol', self.udk_extension_symbol)
-        self.add_udk_extension_handlers(b'resettarget', self.udk_extension_resettarget)
 
         #### Loaded Modules UDK Extension
         self.add_udk_extension_handlers(b'fmodules', self.udk_extension_fmodules)
@@ -290,9 +289,7 @@ class UdkGdbStub(gdbserver.GdbHostStub):
             self.udk.reset()
         self.ensure_breakpoints()
         self.udk.single_stepping()
-#            return self.udk.handle_break_cause()
-#        self.udk.single_stepping()
-#        return self.udk.handle_break_cause()
+        return self.udk.handle_break_cause()
 
     ### Called by GDB to write memory on the target
     def write_memory_impl(self, address, size, data):
@@ -354,19 +351,6 @@ class UdkGdbStub(gdbserver.GdbHostStub):
             self.rsp.send_packet(b'OK')
         else:
             self.rsp.send_packet(b'E91')
-
-    def udk_extension_resettarget(self, args):
-        self.udk.reset()
-        self.udk.reset()
-        self.udk.reset()
-        self.rsp.send_packet(b'OK')
-
-        ## Absorb the continue from the target
-#        message = self.rsp.receive_packet()
-#        while not message.startswith(b'c') and not message.startswith(b'C'):
-#            print('{0!s}'.format(message))
-#            self.rsp.send_packet(b'')
-#            message = self.rsp.receive_packet()
 
 class UdkStub(udkserver.UdkTargetStub):
     def __init__(self, target, server):

@@ -422,36 +422,7 @@ class Edk2ResetTarget(gdb.Command):
 
         for line in UdkCommandHelper.executeCommand("signal SIGKILL"):
             print(line)
-#        response = UdkCommandHelper.sendUdkExtensionPacket("resettarget")
-#        if response != "OK":
-#            print(FAILED_TO_EXECUTE_COMMAND % response)
-#        else:
-#            print(TARGET_IS_RUNNING_AFTER_RESET)
-#            for line in UdkCommandHelper.executeCommand("c"):
-#                print(line)
 Edk2ResetTarget()
-
-class Edk2ResetDelay(gdb.Command):
-    """Configurate how long remote target do reset action.
-    """
-
-    def __init__(self):
-        super(Edk2ResetDelay, self).__init__("set resetdelay", gdb.COMMAND_RUNNING, gdb.COMPLETE_NONE)
-
-    def invoke(self, arg, from_tty):
-        self.dont_repeat()
-        args = UdkCommandHelper.checkParameter(arg, 1)
-        if args == None:
-            return
-        try:
-            delay = int(args[0])
-        except:
-            delay = 0
-        if delay < 1 or delay > 20:
-            print(ARGUMENT_1_TO_20_EXPECTED)
-            return
-        UdkCommandHelper.sendUdkExtensionPacket("resetdelay:%d" % delay)
-Edk2ResetDelay()
 
 class Edk2ImageLoader:
     def __init__(self):
