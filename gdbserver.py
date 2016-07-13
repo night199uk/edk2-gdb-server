@@ -6,7 +6,7 @@ import binascii
 import enum
 
 logger = logging.getLogger('gdbserver')
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 #### This should be generated from the gdb signals.def
 class Signals(enum.IntEnum):
@@ -31,11 +31,28 @@ class BreakpointState(enum.IntEnum):
     BP_ACTIVE       =    0x02
     BP_REMOVED      =    0x03
 
-class Breakpoint:
+class Breakpoint(object):
     def __init__(self, address):
         self.state = BreakpointState.BP_UNDEFINED
         self.address = address
         self.first_byte = None
+
+class Segment(object):
+    def __init__(self, address):
+        self.name = None
+        self.address = None
+
+class Section(object):
+    def __init__(self, name, address, length):
+        self.name = name
+        self.address = address
+        self.length = length
+
+class SharedLibrary(object):
+    def __init__(self, address):
+        self.name = None
+        self.segment = None
+        self.sections = None
 
 #### This should be generated from the packaged gdb xmls eventually
 # can be viewed in a running gdb with maint remote-registers
@@ -135,6 +152,7 @@ class GdbHostStub(object):
         self.add_packet_handler(b'c', self.continue_execution)
         self.add_packet_handler(b'C', self.continue_execution_with_signal)
         self.add_packet_handler(b'g', self.read_registers)
+        self.add_packet_handler(b'k', self.disconnect)
         self.add_packet_handler(b'm', self.read_memory)
         self.add_packet_handler(b'M', self.write_memory)
         self.add_packet_handler(b'p', self.read_register)
@@ -168,6 +186,7 @@ class GdbHostStub(object):
 
         #### qXfer:object:read:annex:offset,length features
         self.xmls = collections.defaultdict(dict)
+
         self.add_feature(b'qXfer:features:read', False)
         self.add_feature(b'qXfer:libraries:read', False)
         self.add_general_query_handler(b'Xfer', self.general_query_xfer)
@@ -184,6 +203,8 @@ class GdbHostStub(object):
 #        self.add_general_query_handler(b'TsV', self.general_query_trace_var_subsequent)
 #        self.add_general_query_handler(b'TfP', self.general_query_tracepoint_first)
 #        self.add_general_query_handler(b'TsP', self.general_query_tracepoint_subsequent)
+
+        self.add_verbose_handler(b'Kill', self.vkill)
 
 
     def add_feature(self, feature, value = True):
@@ -206,6 +227,7 @@ class GdbHostStub(object):
 
     #### Top Level GDB Commands
     ###
+
 
     def find_breakpoint(self, addr):
         for i, d in enumerate(self.breakpoints):
@@ -308,6 +330,13 @@ class GdbHostStub(object):
 
         sig = int(sig, 16)
         self.continue_execution_with_signal_impl(sig, addr)
+
+    def disconnect_impl(self, sig, addr):
+        raise NotImplementedError("implement GdbHostStub and override disconnect_impl")
+
+    def disconnect(self, args):
+        self.disconnect_impl()
+        return False
 
     def extended_mode(self, args):
         """‘!’
@@ -429,6 +458,9 @@ class GdbHostStub(object):
         Reply: See Stop Reply Packets, for the reply specifications."""
         self.step_instruction_with_signal_impl()
 #        self.rsp.send_stop_reply_packet(cause, nr)
+
+    def vkill(self, args):
+        pass
 
     def write_memory_impl(self, address, size):
         raise NotImplementedError("implement GdbHostStub and override write_memory_impl")
@@ -614,17 +646,21 @@ class GdbRemoteSerialProtocol(object):
         initialized = self.initialized
         self.initialized = True
         if cmd == b'+' and initialized == False:
-            return
+            return True
 
         if cmd == b'\x03':
             logger.debug('break received'.format(message))
 
+        if cmd == b'-':
+            logger.debug('resend requested'.format(message))
+            return True
+
         if cmd not in self.stub.packet_handlers:
             logger.warning('{} command not handled'.format(message))
             self.send_packet(b'')
-            return
+            return True
 
-        self.stub.packet_handlers[cmd](subcmd)
+        return self.stub.packet_handlers[cmd](subcmd)
 
     def receive_packet(self):
         c = self.connection.read(1)
@@ -675,6 +711,7 @@ class GdbRemoteSerialProtocol(object):
         checksum = self.calculate_checksum(message)
         self.send(b'$%s#%02x' % (message, checksum))
         if not self.no_acknowledgement_mode:
+            logger.debug('waiting for acknowledgement'.format(message))
             self.expect_ack()
 
     def send(self, packet):
@@ -709,27 +746,6 @@ class GdbRemoteSerialProtocol(object):
 
 
     #### Not used yet
-    def step(self, addr=None):
-        pkt = 's'
-        if addr != None:
-            pkt += '%x' % (addr)
-        self.__send_msg(pkt)
-
-    def __z_packet(self, pkt):
-        self.__send_msg(pkt)
-        reply = self.__recv_msg()
-        if reply == b'':
-            info('Z packets are not supported by target.')
-        else:
-            if (reply != 'OK'):
-                raise RemoteException('Unexpected reply: %s' % str(reply))
-
-    def break_insert(self, addr, _len=0, _type=0):
-        self.__z_packet('Z%d,%x,%x' % (_type, addr, _len))
-
-    def break_remove(self, addr, _len=0, _type=0):
-        self.__z_packet('z%d,%x,%x' % (_type, addr, _len))
-
     def expect_signal(self):
         msg = self.__recv_msg()
         assert len(msg) == 3 and msg[0] == 'S', 'Expected "S", received "%c" % msg[0]'

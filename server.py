@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 """
 """
@@ -9,13 +9,18 @@ import collections
 import logging
 import select
 import serial
+#import signal
+#import sys
+import io
 import socket
 import ctypes
-import time
+import pefile
+#import macholib
 import xml.etree.ElementTree
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger()
+logger.setLevel(logging.DEBUG)
 
 #### This should be generated from the packaged gdb xmls eventually
 # can be viewed in a running gdb with maint remote-registers
@@ -134,6 +139,19 @@ class PeCoffLoaderImageContext(ctypes.Structure):
     def pdb_name(self, pdb_name):
         self._pdb_name = pdb_name
 
+class GUID(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [('Data1', ctypes.c_uint32),
+                ('Data2', ctypes.c_uint16),
+                ('Data3', ctypes.c_uint16),
+                ('Data4', ctypes.c_uint8 * 8)]
+
+class CodeViewRSDSEntry(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [('Signature', ctypes.c_char * 4),
+                ('GUID', GUID),
+                ('Age', ctypes.c_uint32)]
+
 class LoadedImagePrivateData(ctypes.Structure):
     _fields_ = [('signature', ctypes.c_uint64),
                 ('handle', ctypes.c_uint64),
@@ -155,8 +173,6 @@ class LoadedImagePrivateData(ctypes.Structure):
                 ('runtime_data', ctypes.c_uint64),
                 ('image_context', PeCoffLoaderImageContext)]
 
-
-
 class UdkGdbStub(gdbserver.GdbHostStub):
     def __init__(self, rsp, udk):
         super(UdkGdbStub, self).__init__(rsp)
@@ -176,18 +192,44 @@ class UdkGdbStub(gdbserver.GdbHostStub):
         self.add_udk_extension_handlers(b'fmodules', self.udk_extension_fmodules)
         self.add_udk_extension_handlers(b'smodules', self.udk_extension_smodules)
 
+        self.add_feature(b'qXfer:features:read', True)
+        self.add_feature(b'qXfer:libraries:read', True)
+
+        self.reset()
+        self.udk.connect(self)
+
+    def reset(self):
+        """Reset
+        Called when the UDK Target Reboots to re-initialize any transient GDB state
+        """
+        logger.warn("target reset()")
         target = xml.etree.ElementTree.Element('target', version='1.0')
         architecture = xml.etree.ElementTree.SubElement(target, 'architecture')
         architecture.text = 'i386:x86-64'
         target_xml = xml.etree.ElementTree.tostring(target, encoding='utf-8', method='xml')
 
         self.set_xml(b'features', b'target.xml', target_xml)
-        self.add_feature(b'qXfer:features:read', True)
 
+        self.libraries_xml = xml.etree.ElementTree.Element('library-list')
+        self.set_xml(b'libraries', b'', xml.etree.ElementTree.tostring(self.libraries_xml, encoding='utf-8', method='xml'))
+        for i, breakpoint in enumerate(self.breakpoints):
+            if breakpoint.state == gdbserver.BreakpointState.BP_ACTIVE:
+                breakpoint.state = gdbserver.BreakpointState.BP_SET
+                breakpoint.first_byte = None
+            elif breakpoint.state == gdbserver.BreakpointState.BP_REMOVED:
+                del self.breakpoints[i]
 
-        #
-        self.add_feature(b'qXfer:libraries:read', True)
-
+    def add_library(self, library, segment, sections = None):
+        """Add Library
+        Called when the target loads shared library that should be recorded for GDB.
+        """
+        library = xml.etree.ElementTree.SubElement(self.libraries_xml, 'library', name = library)
+        if not sections:
+            xml.etree.ElementTree.SubElement(library, 'segment', address='0x{0:x}'.format(segment))
+        else:
+            for section in sections:
+                xml.etree.ElementTree.SubElement(library, 'section', address='0x{0:x}'.format(section.address))
+        self.set_xml(b'libraries', b'', xml.etree.ElementTree.tostring(self.libraries_xml, encoding='utf-8', method='xml'))
 
     def ensure_breakpoints(self):
         for i, breakpoint in enumerate(self.breakpoints):
@@ -201,14 +243,15 @@ class UdkGdbStub(gdbserver.GdbHostStub):
             elif breakpoint.state == gdbserver.BreakpointState.BP_ACTIVE:
                 first_byte = self.udk.read_memory(breakpoint.address, 1, 1)
                 if first_byte != b'\xcc':
-                    logger.debug("breakpoint marked active but no deployed")
+                    logger.warn("breakpoint marked active but no deployed")
+                breakpoint.state = gdbserver.BreakpointState.BP_SET
             elif breakpoint.state == gdbserver.BreakpointState.BP_REMOVED:
                 first_byte = self.udk.read_memory(breakpoint.address, 1, 1)
                 if first_byte != b'\xcc':
-                    logger.debug("breakpoint marked removed but not active")
-                    continue
-                logger.debug("deleting breakpoint now")
-                self.udk.write_memory(breakpoint.address, 1, 1, breakpoint.first_byte)
+                    logger.warn("breakpoint marked removed but not active")
+                elif breakpoint.first_byte:
+                    self.udk.write_memory(breakpoint.address, 1, 1, breakpoint.first_byte)
+                logger.warn("breakpoint marked removed but not active")
                 del self.breakpoints[i]
 
     ##### GDB Target Stub Side
@@ -220,17 +263,21 @@ class UdkGdbStub(gdbserver.GdbHostStub):
     def continue_execution_with_signal_impl(self, signal, addr):
         if signal == 9:
             self.udk.reset()
-            return
+            return True
 
         self.ensure_breakpoints()
         self.udk.go()
+
+    def disconnect_impl(self):
+        self.udk.detach()
+        return False
 
     ### Called by GDB to request the break cause from the target
     def halt_reason_impl(self):
         return self.udk.handle_break_cause()
 
     def insert_breakpoint_impl(self, index, address, kind):
-        logger.debug("adding breakpoint {}".format(address))
+        logger.info("adding breakpoint: index: {}, address: {}".format(index, address))
         for breakpoint in self.breakpoints:
             if breakpoint.address == address:
                 return
@@ -239,6 +286,7 @@ class UdkGdbStub(gdbserver.GdbHostStub):
         self.breakpoints.append(breakpoint)
 
     def remove_breakpoint_impl(self, index, address, kind):
+        logger.info("removing breakpoint: index: {}, address: {}".format(index, address))
         for breakpoint in self.breakpoints:
             if breakpoint.address == address:
                 breakpoint.state = gdbserver.BreakpointState.BP_REMOVED
@@ -319,7 +367,9 @@ class UdkGdbStub(gdbserver.GdbHostStub):
         self.rsp.send_packet(b'use64')
 
     def udk_extension_exception(self, args):
-        self.rsp.send_packet(b'')
+        (vector, error_code) = self.udk.get_exception()
+        msg = '{0:x};{1:x}'.format(vector, error_code)
+        self.rsp.send_packet(msg.encode('utf-8'))
 
     def udk_extension_next_module(self):
         try:
@@ -345,7 +395,19 @@ class UdkGdbStub(gdbserver.GdbHostStub):
         self.udk_extension_next_module()
 
     def udk_extension_symbol(self, args):
-        self.rsp.send_packet(b'E91')
+        address = int(args, 0)
+        (pdb_name, image_addr, sections) = self.udk.symbol(address)
+        if pdb_name is None:
+            self.rsp.send_packet(b'E91')
+            return
+
+        msg = '{0};0x{1:x}'.format(pdb_name.decode('utf-8'), image_addr)
+        text_sections = []
+        for section in sections:
+            text_sections.append('{0}=0x{1:x}'.format(section['name'].decode('utf-8'), section['address']))
+        msg = msg + ';' + ';'.join(text_sections)
+#        logger.debug(msg)
+        self.rsp.send_packet(msg.encode('utf-8'))
 
     def udk_extension_checkexpat(self, args):
         if args == b'start':
@@ -356,33 +418,96 @@ class UdkGdbStub(gdbserver.GdbHostStub):
 class UdkStub(udkserver.UdkTargetStub):
     def __init__(self, target, server):
         super(UdkStub, self).__init__(target)
+        self.images = {}
         self.server = server
         self.libraries = []
-        self.libraries_xml = xml.etree.ElementTree.Element('library-list')
         self.gdb = None
 
-    def add_library(self, pdb_name, image_context):
-        if not pdb_name.endswith('.dll'):
-            pdb_name += '.dll'
-
-        self.libraries.append({'pdb_name': pdb_name, 'image_context': image_context})
-
-        library = xml.etree.ElementTree.SubElement(self.libraries_xml, 'library', name = pdb_name)
-        xml.etree.ElementTree.SubElement(library, 'segment', address='0x{0:x}'.format(image_context.image_addr))
-        libraries_xml_str = xml.etree.ElementTree.tostring(self.libraries_xml, encoding='utf-8', method='xml')
-
-        if self.gdb:
-            self.gdb.set_xml(b'libraries', b'', libraries_xml_str)
-
-    def attach(self, gdb):
+    def connect(self, gdb):
         self.gdb = gdb
+        for library in self.libraries:
+            self.gdb.add_library(library['pdb_name'], library['text_section'], library['sections'])
+
+    def search_image(self, address):
+        image_search_start = address & 0xfffffffffffff000;
+        image_search_end = image_search_start - 0x80000
+        if image_search_end < 0:
+            image_search_end = 0
+
+        image_search = image_search_start
+        # Max go back 512K
+        while image_search > image_search_end:
+            header = self.read_memory(image_search, 1, 2)
+            if header == b'VZ' or header == b'MZ':
+#                logger.debug(str(header))
+                return image_search
+            image_search = image_search - 0x1000
+        return None
+
+    def obtain_image(self, image_address):
+        peheader = self.read_memory(image_address, 1, 0x600)
+        pe = pefile.PE(data = peheader, fast_load = True)
+        directory_index = pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_DEBUG']
+        dir_entry = pe.OPTIONAL_HEADER.DATA_DIRECTORY[directory_index]
+        peheader += b'\0' * (dir_entry.VirtualAddress - 0x600)
+        peheader += self.read_memory(image_address + dir_entry.VirtualAddress, 1, dir_entry.Size)
+        return peheader
+
+    def symbol(self, address):
+        image_address = self.search_image(address)
+        if image_address is None:
+            return (None, None, None)
+
+        if not image_address in self.images:
+            self.images[image_address] = self.obtain_image(image_address)
+
+        image_data = self.images[image_address]
+
+#        logger.debug('found PE32 image signature at: 0x{0:x}'.format(image_address))
+        pdb_name = b''
+        sections = []
+        try:
+            pe = pefile.PE(data = image_data, fast_load = True)
+            pe.parse_data_directories(pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_DEBUG'])
+#            logger.debug(pe.dump_info())
+            for pesection in pe.sections:
+                sections.append({'name': pesection.Name.strip(b'\x00'),
+                                 'address': pesection.VirtualAddress + pe.OPTIONAL_HEADER.ImageBase})
+
+            try:
+                for entry in pe.DIRECTORY_ENTRY_DEBUG:
+                    if entry.struct.Type == 2: # IMAGE TYPE CODEVIEW
+                        off = entry.struct.PointerToRawData
+                        size = entry.struct.SizeOfData
+                        data = image_data[off:off+size]
+
+                        cv = CodeViewRSDSEntry.from_buffer_copy(data)
+                        if (cv.Signature == b'MTOC'):
+                            pdb_name = data[20:].strip(b'\x00')
+                        elif (cv.Signature == b'RSDS'):
+                            pdb_name = data[24:].strip(b'\x00')
+                        else:
+                            logger.warn('Unknown debug signature {0:s}'.format(cv.Signature))
+            except AttributeError:
+                pdb_name = b'NoDebugData'
+                pass
+
+        except pefile.PEFormatError:
+            pass
+        return (pdb_name, image_address, sections)
 
     ##### UDK Host Side
+    def handle_init_break(self, packet):
+        super(UdkStub, self).handle_init_break(packet)
+        self.server.start_socket()
+
     ### Called by UDK Server when memory is ready on the target
     def handle_memory_ready_impl(self):
         self.libraries = []
-        self.libraries_xml = xml.etree.ElementTree.Element('library-list')
-        self.server.start_socket()
+        self.images = {}
+#        self.server.start_socket()
+        if self.gdb:
+            self.gdb.reset()
 
     ### Called by UDK Server when memory is ready on the target
     def handle_break_point_impl(self):
@@ -394,6 +519,7 @@ class UdkStub(udkserver.UdkTargetStub):
 
     ### Called to generate a response when the target is stopped at a SW breakpoint
     def handle_break_cause_sw_breakpoint_impl(self, stop_address):
+        logger.debug('swbreak caused stop at address 0x{0:x}'.format(stop_address))
         return (5, {b'swbreak': b''})
 
     ### Called to generate a response when the target is stopped at a SW breakpoint
@@ -408,17 +534,17 @@ class UdkStub(udkserver.UdkTargetStub):
 
         image_context = loaded_image_private_data.image_context
 
-        logger.debug('signature: 0x{0:x}'.format(loaded_image_private_data.signature))
+#        logger.debug('signature: 0x{0:x}'.format(loaded_image_private_data.signature))
         if loaded_image_private_data.signature == 0x6972646c:
             logger.debug('EDK_LOADED_IMAGE_PRIVATE_DATA:')
-            logger.debug('signature: 0x{0:x} entrypoint: 0x{1:x}, image_base_page: 0x{2:x}, number_of_pages: 0x{3:x}'
+            logger.info('signature: 0x{0:x} entrypoint: 0x{1:x}, image_base_page: 0x{2:x}, number_of_pages: 0x{3:x}'
                 .format(loaded_image_private_data.signature,
                         loaded_image_private_data.entrypoint,
                         loaded_image_private_data.image_base_page,
                         loaded_image_private_data.number_of_pages))
 
             logger.debug('EFI_LOADED_IMAGE_PROTOCOL:')
-            logger.debug('revision: 0x{0:x} image_base: 0x{1:x}, image_size: 0x{2:x}'
+            logger.info('revision: 0x{0:x} image_base: 0x{1:x}, image_size: 0x{2:x}'
                 .format(loaded_image_private_data.info.revision,
                         loaded_image_private_data.info.image_base,
                         loaded_image_private_data.info.image_size))
@@ -433,8 +559,46 @@ class UdkStub(udkserver.UdkTargetStub):
                 image_context.entrypoint = loaded_image_private_data.entrypoint
 
         pdb_name = self.read_null_terminated_string(pdb_name_addr)
+        if pdb_name.endswith('.dll'):
+           pdb_name = pdb_name[:-4]
+        if not pdb_name.endswith('.dll'):
+            pdb_name += '.dll'
+
+
         logger.info('module {0} loaded at address 0x{1:x} with size 0x{2:x}'.format(pdb_name, image_context.image_addr, image_context.image_size))
-        self.add_library(pdb_name, image_context)
+
+        ### Get .text offset:
+        # When specifying a segment address, GDB uses segment relocation code.
+        # Whereas a PE32 has only a single segment, a Mach-O binary has 2 segments:
+        # .text and .data. So, gdb expects the segment address to be the address of
+        # the .text segment.
+        offset = 0
+        sections = []
+        peheader = self.read_memory(image_context.image_addr, 1, 1024)
+        try:
+            pe = pefile.PE(data = peheader)
+            for pesection in pe.sections:
+                if pesection.Name.strip(b'\x00') == b'.text':
+                    offset = pesection.VirtualAddress
+
+#                section = gdbserver.Section(pesection.Name.strip(b'\x00'),
+#                                            pesection.VirtualAddress + image_context.image_addr,
+#                                            pesection.Misc_VirtualSize)
+#                if section.name == b'.text' or \
+#                   section.name == b'.data':
+#                    sections.append(section)
+#
+#                logger.info('module {0} section {1!s} loaded at address 0x{2:x} with size 0x{3:x}'.format(pdb_name, section.name, image_context.image_addr + section.address, section.length))
+        except pefile.PEFormatError:
+            pass
+
+        self.libraries.append({'pdb_name': pdb_name,
+                               'image_context': image_context,
+                               'text_section': image_context.image_addr + offset,
+                               'sections': sections})
+        if self.gdb:
+            self.gdb.add_library(pdb_name, image_context.image_addr + offset, sections)
+
         return (5, {b'library': b''})
 
     def handle_break_cause_stepping_impl(self, stop_address):
@@ -446,7 +610,7 @@ class UdkStub(udkserver.UdkTargetStub):
 
 
 class UdkGdbServer():
-    def __init__(self, serial_name = '/dev/cu.usbmodem1a141', host = '0.0.0.0', port = 1234):
+    def __init__(self, serial_name = '/dev/pts/1', host = '0.0.0.0', port = 1234):
         self._serial_name = serial_name
         self._serial = None
 
@@ -458,7 +622,6 @@ class UdkGdbServer():
         self._poll_handlers = {}
 
         self.udk = None
-        self.gdb = None
 
     def add_poll_fd(self, fd, handler):
         self._poll.register(fd, select.POLLIN)
@@ -479,7 +642,6 @@ class UdkGdbServer():
     def socket_handler(self):
         self.connection, self.remote_addr = self._socket.accept()
         self.gdb = gdbserver.GdbRemoteSerialProtocol(self.connection.makefile('rwb', buffering = 0), UdkGdbStub, self.udk.stub)
-        self.udk.stub.attach(self.gdb.stub)
         self.add_poll_fd(self.connection.fileno(), self.gdb.command_communication)
         logger.info("Received a connection from {}".format(self.remote_addr))
 
@@ -492,7 +654,13 @@ class UdkGdbServer():
         logger.info("Listening on {}:{} for connections".format(self._host, self._port))
 
     def run(self):
+#        def signal_handler(signal, frame):
+#            sys.exit(0)
+
         self.start_serial()
+
+#        signal.signal(signal.SIGINT, signal_handler)
+#        signal.pause()
 
         while True:
             for (fd, event) in self._poll.poll():
@@ -509,7 +677,10 @@ class UdkGdbServer():
                     raise Exception("unknown fd raised poll event")
 
                 try:
-                    self._poll_handlers[fd]()
+                    status = self._poll_handlers[fd]()
+                    if status is False:
+                        logger.warning("Disconnected handler.")
+                        self.remove_poll_fd(fd)
                 except udkserver.AbortError:
                     pass
 

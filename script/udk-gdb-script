@@ -434,7 +434,7 @@ class Edk2ImageLoader:
         if not self._issymbolpresent(cur):
             debug_info = UdkCommandHelper.getTargetDebugInfo(cur)
             if (debug_info != None):
-                (debug_link, section_info) = debug_info
+                (debug_link, image_addr, section_info) = debug_info
                 if debug_link.endswith(".pdb"):
                     print(UNSUPPORTED_DEBUG_INFORMATION)
                     return False
@@ -442,23 +442,24 @@ class Edk2ImageLoader:
                    ".text" not in section_info or ".data" not in section_info:
                     print(MISSING_DEBUG_INFORMATION)
                     return False
-                cmd = "add-symbol-file %s 0x%x" % (debug_link, section_info[".text"])
 
-                for section_name, section_addr in list(section_info.items()):
-                    if section_name not in [".debug", ".gnu_deb", ".reloc", ".text"]:
-                        cmd += " -s %s 0x%x" % (section_name, section_addr)
-                try:
-                    if display:
-                        gdb.execute(cmd)
-                    else:
-                        UdkCommandHelper.executeCommand(cmd)
-                except RuntimeError as e:
-                    if str(e).find("No such file or directory") != -1:
-                        print(FAILED_TO_FIND_SYMBOL_FILE)
-                    return False
-                except Exception:
-                    print(FAILED_TO_LOAD_SYMBOL)
-                    return False
+                # Mach-O uses segment loading
+                cmd = "add-symbol-file %s 0x%x" % (debug_link, section_info['.text'])
+#                for section_name, section_addr in list(section_info.items()):
+#                    if section_name not in [".debug", ".gnu_deb", ".reloc", ".text"]:
+#                        cmd += " -s %s 0x%x" % (section_name, section_addr)
+#                try:
+#                    if display:
+#                        gdb.execute(cmd)
+#                    else:
+#                        UdkCommandHelper.executeCommand(cmd)
+#               except RuntimeError as e:
+#                   if str(e).find("No such file or directory") != -1:
+#                       print(FAILED_TO_FIND_SYMBOL_FILE)
+#                   return False
+#               except Exception:
+#                   print(FAILED_TO_LOAD_SYMBOL)
+#                   return False
                 self._addsymbol(section_info[".text"], section_info[".data"])
                 return True
             else:

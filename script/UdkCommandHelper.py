@@ -106,13 +106,15 @@ def sendUdkExtensionPacket(cmd):
 
 def getTargetDebugInfo(pc):
     response = sendUdkExtensionPacket("symbol:0x%x" % pc)
-    # /home/ray/a.dll;.text=0x1234;.data=0x4567
+    # /home/ray/a.dll;0x1000;.text=0x1234;.data=0x4567
+    print(str(response))
     array = response.split(";")
-    if (len(array) > 1):
-        debug_info = (array[0], {})
-        for section in array[1:]:
+    if (len(array) > 2):
+        image_addr = int(array[1], 16)
+        debug_info = (array[0], image_addr, {})
+        for section in array[2:]:
             (section_name, section_addr) = section.split("=")
-            debug_info[1][section_name] = int(section_addr, 16)
+            debug_info[2][section_name] = int(section_addr, 16)
         return debug_info
     return None
 

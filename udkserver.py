@@ -11,9 +11,9 @@ import enum
 import binascii
 
 logger = logging.getLogger('udkserver')
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
-PACKET_READ_TIMEOUT = 0.25
+PACKET_READ_TIMEOUT = 2
 
 DEBUG_STARTING_SYMBOL_ATTACH = 0xfa
 DEBUG_STARTING_SYMBOL_COMPRESS = 0xfc
@@ -277,7 +277,7 @@ class Packet(object):
     def from_bytes(cls, data):
         starting_symbol, command, length, seqno, crc = struct.unpack("<BBBBH", data[0:6])
         if crc != cls.calculate_crc16(data[0:4] + b'\x00\x00' + data[6:length]):
-            logger.debug(str(binascii.hexlify(data)))
+#            logger.debug(str(binascii.hexlify(data)))
             raise CrcError(crc)
 
         data = data[6:length]
@@ -334,12 +334,207 @@ class Packet(object):
     def data(self, data):
         self._data = data
 
+class UdkTarget(object):
+    def __init__(self, connection, clazz, *args, **kwargs):
+        self.seqno = 1
+        self.target_seqno = 0
+        self.last_ack = 0
+        self.msg = bytearray()
+
+        if connection is None:
+            raise UdkError()
+        self.connection = connection
+
+        self.stub = clazz(self, *args, **kwargs)
+        if not isinstance(self.stub, UdkTargetStub):
+            raise UdkError()
+
+    def command_communication(self):
+        packet = self.receive_packet(timeout = 0)
+        if packet is None:
+            return
+
+        if packet.is_response():
+            return
+
+        logger.debug("Request {} sequence {}".format(packet.command, packet.seqno))
+        if packet.command == DebugCommands.DEBUG_COMMAND_INIT_BREAK or \
+           packet.command == DebugCommands.DEBUG_COMMAND_ATTACH_BREAK:
+            self.seqno = 1
+            self.target_seqno = 0
+        elif packet.seqno == self.target_seqno:
+            logger.warning("TARGET: received one old command [{}] against command [{}]".format(packet.command, packet.seqno))
+            self.send_ack_packet(self.last_ack, packet.seqno)
+            return
+        elif packet.seqno == (self.target_seqno + 1) % 256:
+            self.target_seqno = packet.seqno
+        else:
+            logger.warning("Receive one invalid command [seqno: 0x{:x}] against command[target_seqno: 0x{:x}]".format(packet.seqno, self.target_seqno))
+            return
+
+        self.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, packet.seqno)
+        if packet.command in self.stub.handlers:
+            self.stub.handlers[packet.command](packet)
+
+    def receive_packet(self, timeout = PACKET_READ_TIMEOUT, wait = True):
+        incompatibility_flag = False
+        running = True
+
+#        timeout_for_start_symbol = timeout
+#        if not wait:
+#            timeout_for_start_symbol = 0
+
+        while running:
+            running = wait
+            self.connection.timeout = timeout
+            data = self.connection.read(1)
+            if not data:
+                return
+
+            starting_symbol = data[0]
+            if not starting_symbol & 0x80:
+                self.msg.extend(data)
+                running = True
+                continue
+
+            if self.msg:
+                logger.info(self.msg.decode('utf-8'))
+                self.msg = bytearray()
+
+            starting_symbol = data[0]
+            if starting_symbol != DEBUG_STARTING_SYMBOL_NORMAL and \
+               starting_symbol != DEBUG_STARTING_SYMBOL_COMPRESS:
+                logger.error("Invalid starting symbol received")
+                continue
+
+            self.connection.timeout = PACKET_READ_TIMEOUT
+            data = data + self.connection.read(2)
+            length = data[2]
+            if length < 6:  # sizeof(DEBUG_PACKET_HEADER)
+                if incompatibility_flag:
+                   incompatibility_flag = True
+                # Skip the bad small packet
+                continue
+
+            data = data + self.connection.read(length - 3)
+            try:
+                packet = Packet.from_bytes(data)
+            except CrcError:
+                logger.warning("CRC error received")
+                continue
+
+            ### Ergh, these can come anywhere in the flow - output them and carry on
+            if packet.command == DebugCommands.DEBUG_COMMAND_PRINT_MESSAGE:
+                logger.debug("target: {}".format(packet.data.decode('utf-8').strip()))
+                continue
+
+            packet.dump(False)
+            return packet
+
+    def send_command_no_wait(self, command, seqno):
+        if command != DebugCommands.DEBUG_COMMAND_OK:
+            logger.error("Send cmd({})".format(command))
+
+        logger.debug("SendAckPacket: SequenceNo = {}".format(seqno))
+        packet = Packet(DEBUG_STARTING_SYMBOL_NORMAL, command, seqno)
+        packet.dump(True)
+        self.connection.write(packet.to_bytes())
+
+    def send_ack_packet(self, ack_command, seqno):
+        if ack_command != DebugCommands.DEBUG_COMMAND_OK:
+            logger.error("Send ACK({})".format(ack_command))
+
+        logger.debug("SendAckPacket: SequenceNo = {}".format(seqno))
+        packet = Packet(DEBUG_STARTING_SYMBOL_NORMAL, ack_command, seqno)
+        packet.dump(True)
+        self.connection.write(packet.to_bytes())
+        self.last_ack = ack_command
+
+    def send_command_and_wait_for_ack_ok(self, command, timeout, data = b''):
+        retries = 3
+        while retries > 0:
+            request = Packet(DEBUG_STARTING_SYMBOL_NORMAL, command.value, self.seqno, data)
+            request.dump(True)
+            self.connection.write(request.to_bytes())
+
+            packet = self.receive_packet()
+            if packet is None:
+                retries = retries - 1
+                logger.warning("TARGET: Timeout waiting for ACK packet.")
+                continue
+
+            if (packet.command == DebugCommands.DEBUG_COMMAND_OK or \
+                packet.command == DebugCommands.DEBUG_COMMAND_HALT_DEFERRED or \
+                packet.command == DebugCommands.DEBUG_COMMAND_HALT_PROCESSED) and \
+               packet.seqno == self.seqno:
+                # Received Ack OK
+                self.seqno = (self.seqno + 1) % 256
+                return packet
+
+            elif packet.command == DebugCommands.DEBUG_COMMAND_ABORT and packet.seqno == self.seqno:
+                # Received Abort - due to error
+                logger.error("TARGET: Abort.")
+                self.seqno = (self.seqno + 1) % 256
+                raise AbortError()
+
+            elif packet.command == DebugCommands.DEBUG_COMMAND_INIT_BREAK:
+                logger.error("TARGET: Rebooted.")
+                continue
+#                raise AbortError()
+
+            elif packet.command == DebugCommands.DEBUG_COMMAND_IN_PROGRESS and packet.seqno == self.seqno:
+                self.seqno = (self.seqno + 1) % 256
+                while True:
+                    continue_packet = Packet(DEBUG_STARTING_SYMBOL_NORMAL, DebugCommands.DEBUG_COMMAND_CONTINUE, self.seqno)
+                    continue_packet.dump(True)
+                    self.connection.write(continue_packet.to_bytes())
+
+                    additional = self.receive_packet()
+                    if additional.command == DebugCommands.DEBUG_COMMAND_IN_PROGRESS and additional.seqno == self.seqno:
+                        packet.data = packet.data + additional.data
+                        self.seqno = (self.seqno + 1) % 256
+                        continue
+                    elif additional.command == DebugCommands.DEBUG_COMMAND_IN_PROGRESS and additional.seqno == (self.seqno - 1):
+                        continue
+                    elif additional.command == DebugCommands.DEBUG_COMMAND_OK and additional.seqno == self.seqno:
+                        packet.data = packet.data + additional.data
+                        packet.seqno = additional.seqno
+                        self.seqno = (self.seqno + 1) % 256
+                        break
+                    else:
+                        raise UdkError("unknown packet type 0x{:x} or unexpected sequence number 0x{:x}".format(additional.command, additional.seqno))
+                return packet
+
+
+        return None
+
+    def send_attach(self):
+        retries = 3
+        while retries > 0:
+            cmd = struct.pack("<B", DEBUG_STARTING_SYMBOL_ATTACH)
+            self.connection.write(cmd)
+            packet = self.receive_packet()
+            if packet is None:
+                retries = retries - 1
+                logger.warning("TARGET: Timeout waiting for ACK packet.")
+                continue
+
+            if packet.command != DebugCommands.DEBUG_COMMAND_OK:
+                logger.warning("Received {}.".format(packet.command))
+                retries = retries -1
+
+            logger.warning("Received ACK for attach packet.")
+            return packet
+        return None
+
+
 
 class UdkTargetStub(object):
     def __init__(self, target):
         self.target = target
         self.handlers = {}
         self.add_handler(DebugCommands.DEBUG_COMMAND_INIT_BREAK, self.handle_init_break)
+        self.add_handler(DebugCommands.DEBUG_COMMAND_ATTACH_BREAK, self.handle_attach_break)
         self.add_handler(DebugCommands.DEBUG_COMMAND_MEMORY_READY, self.handle_memory_ready)
 
         ## Break point handling
@@ -353,7 +548,7 @@ class UdkTargetStub(object):
 #        self.add_break_cause_handler(BreakCauses.DEBUG_DATA_BREAK_CAUSE_USER_HALT, self.handle_break_cause_user_halt)
         self.add_break_cause_handler(BreakCauses.DEBUG_DATA_BREAK_CAUSE_IMAGE_LOAD, self.handle_break_cause_image_load)
 #        self.add_break_cause_handler(BreakCauses.DEBUG_DATA_BREAK_CAUSE_IMAGE_UNLOAD, self.handle_break_cause_image_unload)
-#        self.add_break_cause_handler(BreakCauses.DEBUG_DATA_BREAK_SYSTEM_RESET, self.handle_break_cause_system_reset)
+        self.add_break_cause_handler(BreakCauses.DEBUG_DATA_BREAK_CAUSE_SYSTEM_RESET, self.handle_break_cause_system_reset)
         self.add_break_cause_handler(BreakCauses.DEBUG_DATA_BREAK_CAUSE_EXCEPTION, self.handle_break_cause_exception)
 #        self.add_break_cause_handler(BreakCauses.DEBUG_DATA_BREAK_CAUSE_MEMORY_READY, self.handle_break_cause_memory_ready)
 
@@ -364,10 +559,22 @@ class UdkTargetStub(object):
         self.break_cause_handlers[command] = handler
 
     def handle_init_break(self, packet):
+        logger.debug("InitBreak() called")
         self.get_revision()
-        self.put_debugger_setting(DEBUG_AGENT_SETTING_PRINT_ERROR_LEVEL, 0x1f)  # Trace setting
-        self.put_debugger_setting(DEBUG_AGENT_SETTING_SMM_ENTRY_BREAK, 0)  # Trace setting
-        self.put_debugger_setting(DEBUG_AGENT_SETTING_BOOT_SCRIPT_ENTRY_BREAK, 0)  # Trace setting
+#        self.put_debugger_setting(DEBUG_AGENT_SETTING_PRINT_ERROR_LEVEL, 0x1f)  # Trace setting
+#        self.put_debugger_setting(DEBUG_AGENT_SETTING_SMM_ENTRY_BREAK, 0)  # Trace setting
+#        self.put_debugger_setting(DEBUG_AGENT_SETTING_BOOT_SCRIPT_ENTRY_BREAK, 0)  # Trace setting
+        self.get_viewpoint()
+        ready = self.memory_ready()
+#        if not ready:
+#            self.go()
+
+    def handle_attach_break(self, packet):
+        logger.debug("AttachBreak() called")
+        self.get_revision()
+#        self.put_debugger_setting(DEBUG_AGENT_SETTING_PRINT_ERROR_LEVEL, 0x1f)  # Trace setting
+#        self.put_debugger_setting(DEBUG_AGENT_SETTING_SMM_ENTRY_BREAK, 0)  # Trace setting
+#        self.put_debugger_setting(DEBUG_AGENT_SETTING_BOOT_SCRIPT_ENTRY_BREAK, 0)  # Trace setting
         self.get_viewpoint()
         ready = self.memory_ready()
         if not ready:
@@ -417,6 +624,12 @@ class UdkTargetStub(object):
     def handle_break_cause_sw_breakpoint(self, stop_address):
         return self.handle_break_cause_sw_breakpoint_impl(stop_address)
 
+    def handle_break_cause_system_reset_impl(self, stop_address, vector, data):
+        raise NotImplementedError("implement UdkHostStub and override handle_break_cause_image_load")
+
+    def handle_break_cause_system_reset(self, stop_address):
+        return self.handle_break_cause_system_reset_impl(stop_address)
+
     def handle_break_cause_exception_impl(self, stop_address, vector, data):
         raise NotImplementedError("implement UdkHostStub and override handle_break_cause_image_load")
 
@@ -431,6 +644,11 @@ class UdkTargetStub(object):
         return self.handle_break_cause_stepping_impl(stop_address)
 
     #### Commands which send no response data
+    def attach(self):
+        logger.debug("Attach() called")
+        self.target.send_attach()
+        logger.debug("Attach() returning")
+
     def halt(self):
         logger.debug("Halt() called")
         self.target.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_HALT, 0)
@@ -445,6 +663,11 @@ class UdkTargetStub(object):
         logger.debug("IGo() called")
         self.target.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_GO, 0)
         logger.debug("IGo() returning")
+
+    def detach(self):
+        logger.debug("Detach() called")
+        self.target.send_command_no_wait(DebugCommands.DEBUG_COMMAND_DETACH, 0)
+        logger.debug("Detach() returning")
 
     def single_stepping(self):
         logger.debug("SingleStepping() called")
@@ -647,169 +870,8 @@ class UdkTargetStub(object):
             addr = addr + 16
 
         null = value.find(b'\x00')
-        value = value[:null].decode('utf-8')
+        try:
+            value = value[:null].decode('utf-8')
+        except UnicodeDecodeError:
+            value = ''
         return value
-
-class UdkTarget(object):
-    def __init__(self, connection, clazz, *args, **kwargs):
-        self.seqno = 1
-        self.target_seqno = 0
-        self.last_ack = 0
-        self.msg = bytearray()
-
-        if connection is None:
-            raise UdkError()
-        self.connection = connection
-
-        self.stub = clazz(self, *args, **kwargs)
-        if not isinstance(self.stub, UdkTargetStub):
-            raise UdkError()
-
-    def command_communication(self):
-        packet = self.receive_packet(wait = False)
-        if packet is None:
-            return
-
-        if packet.is_response():
-            return
-
-        logger.debug("Request {} sequence {}".format(packet.command, packet.seqno))
-        if packet.command == DebugCommands.DEBUG_COMMAND_INIT_BREAK:
-            self.seqno = 1
-            self.target_seqno = 0
-        elif packet.seqno == self.target_seqno:
-            logger.warning("TARGET: received one old command [{}] against command [{}]".format(packet.command, packet.seqno))
-            self.send_ack_packet(self.last_ack, packet.seqno)
-            return
-        elif packet.seqno == (self.target_seqno + 1) % 256:
-            self.target_seqno = packet.seqno
-        else:
-            logger.warning("Receive one invalid command [seqno: 0x{:x}] against command[target_seqno: 0x{:x}]".format(packet.seqno, self.target_seqno))
-            return
-
-        self.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, packet.seqno)
-        if packet.command in self.stub.handlers:
-            self.stub.handlers[packet.command](packet)
-
-    def receive_packet(self, timeout = PACKET_READ_TIMEOUT, wait = True):
-        incompatibility_flag = False
-        running = True
-
-        timeout_for_start_symbol = timeout
-        if not wait:
-            timeout_for_start_symbol = 0
-
-        while running:
-            running = wait
-
-            self.connection.timeout = timeout_for_start_symbol
-            data = self.connection.read(1)
-            self.connection.timeout = timeout
-            if not data:
-                continue
-
-            starting_symbol = data[0]
-            if not starting_symbol & 0x80:
-                self.msg.extend(data)
-                continue
-
-            if self.msg:
-                logger.debug(self.msg.decode('utf-8'))
-                self.msg = bytearray()
-
-            starting_symbol = data[0]
-            if starting_symbol != DEBUG_STARTING_SYMBOL_NORMAL and \
-               starting_symbol != DEBUG_STARTING_SYMBOL_COMPRESS:
-                logger.error("Invalid starting symbol received")
-                continue
-
-            data = data + self.connection.read(2)
-            length = data[2]
-            if length < 6:  # sizeof(DEBUG_PACKET_HEADER)
-                if incompatibility_flag:
-                   incompatibility_flag = True
-                # Skip the bad small packet
-                continue
-
-            data = data + self.connection.read(length - 3)
-            try:
-                packet = Packet.from_bytes(data)
-            except CrcError:
-                packet.dump(False)
-                continue
-
-            ### Ergh, these can come anywhere in the flow - output them and carry on
-            if packet.command == DebugCommands.DEBUG_COMMAND_PRINT_MESSAGE:
-#                logger.debug("target: {}".format(packet.data.decode('utf-8').strip()))
-                continue
-
-            packet.dump(False)
-            return packet
-
-    def send_ack_packet(self, ack_command, seqno):
-        if ack_command != DebugCommands.DEBUG_COMMAND_OK:
-            logger.error("Send ACK({})".format(ack_command))
-
-        logger.debug("SendAckPacket: SequenceNo = {}".format(seqno))
-        packet = Packet(DEBUG_STARTING_SYMBOL_NORMAL, ack_command, seqno)
-        packet.dump(True)
-        self.connection.write(packet.to_bytes())
-        self.last_ack = ack_command
-
-    def send_command_and_wait_for_ack_ok(self, command, timeout, data = b''):
-        retries = 3
-        while retries > 0:
-            request = Packet(DEBUG_STARTING_SYMBOL_NORMAL, command.value, self.seqno, data)
-            request.dump(True)
-            self.connection.write(request.to_bytes())
-
-            packet = self.receive_packet()
-            if packet is None:
-                if command == DebugCommands.DEBUG_COMMAND_INIT_BREAK:
-                    retries = retries - 1
-                else:
-                    logger.warning("TARGET: Timeout waiting for ACK packet.")
-                continue
-
-            if (packet.command == DebugCommands.DEBUG_COMMAND_OK or \
-                packet.command == DebugCommands.DEBUG_COMMAND_HALT_DEFERRED or \
-                packet.command == DebugCommands.DEBUG_COMMAND_HALT_PROCESSED) and \
-               packet.seqno == self.seqno:
-                # Received Ack OK
-                self.seqno = (self.seqno + 1) % 256
-                return packet
-
-            elif packet.command == DebugCommands.DEBUG_COMMAND_ABORT and packet.seqno == self.seqno:
-                # Received Abort - due to error
-                logger.error("TARGET: Abort.")
-                self.seqno = (self.seqno + 1) % 256
-                raise AbortError()
-
-            elif packet.command == DebugCommands.DEBUG_COMMAND_INIT_BREAK:
-                logger.error("TARGET: Rebooted.")
-                raise AbortError()
-
-            elif packet.command == DebugCommands.DEBUG_COMMAND_IN_PROGRESS and packet.seqno == self.seqno:
-                self.seqno = (self.seqno + 1) % 256
-                while True:
-                    continue_packet = Packet(DEBUG_STARTING_SYMBOL_NORMAL, DebugCommands.DEBUG_COMMAND_CONTINUE, self.seqno)
-                    continue_packet.dump(True)
-                    self.connection.write(continue_packet.to_bytes())
-
-                    additional = self.receive_packet()
-                    if additional.command == DebugCommands.DEBUG_COMMAND_IN_PROGRESS and additional.seqno == self.seqno:
-                        packet.data = packet.data + additional.data
-                        self.seqno = (self.seqno + 1) % 256
-                        continue
-                    elif additional.command == DebugCommands.DEBUG_COMMAND_OK and additional.seqno == self.seqno:
-                        packet.data = packet.data + additional.data
-                        packet.seqno = additional.seqno
-                        self.seqno = (self.seqno + 1) % 256
-                        break
-                    else:
-                        raise UdkError("unknown packet type 0x{x} or unexpected sequence number 0x{x}".format(additional.command, additional.seqno))
-                return packet
-
-
-        return None
-
