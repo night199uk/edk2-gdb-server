@@ -793,50 +793,93 @@ class UdkTargetStub(object):
 
     def read_registers(self):
         response = self.target.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_READ_ALL_REGISTERS, 0)
-        values = struct.unpack("<Q HHHHIHHIHBBII10s6s10s6s10s6s10s6s10s6s10s6s10s6s10s6s16s16s16s16s16s16s16s16s16s16s16s16s16s16s16s16s96s QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ", response.data)
-        keys = [
-            ####### DEBUG_DATA_X64_SYSTEM_CONTEXT
-            'exception_data',
-            ### Nested DEBUG_DATA_X64_FX_SAVE_STATE
-            'fcw', 'fsw', 'ftw',
-            'fop',
-            'fpu_ip',
-            'fcs',
-            'reserved1',
-            'fpu_dp',
-            'fds',
-            'reserved2_0', 'reserved2_1',
-            'mxcsr',
-            'mxcsr_mask',
-            'st0mm0', 'reserved3',
-            'st1mm1', 'reserved4',
-            'st2mm2', 'reserved5',
-            'st3mm3', 'reserved6',
-            'st4mm4', 'reserved7',
-            'st5mm5', 'reserved8',
-            'st6mm6', 'reserved9',
-            'st7mm7', 'reserved10',
-            'xmm0', 'xmm1', 'xmm2', 'xmm3',
-            'xmm4', 'xmm5', 'xmm6', 'xmm7',
-            'xmm8', 'xmm9', 'xmm10', 'xmm11',
-            'xmm12', 'xmm13', 'xmm14', 'xmm15',
-            'reserved11',
-            #####
-            'dr0', 'dr1', 'dr2', 'dr3', 'dr6', 'dr7',
-            'eflags',
-            'ldtr', 'tr',
-            'gdtr_0', 'gdtr_1',
-            'idtr_0', 'idtr_1',
-            'eip',
-            'gs', 'fs', 'es', 'ds', 'cs', 'ss',
-            'cr0', 'cr1', 'cr2', 'cr3', 'cr4',
-            'rdi', 'rsi', 'rbp', 'rsp',
-            'rdx', 'rcx', 'rbx', 'rax',
-            'cr8',
-            'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15'
-        ]
-        self.target.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
-        registers = dict(zip(keys, values))
+        logger.debug(str(len(response.data)))
+        if len(response.data) == 648:   # IA32 CPU Context
+            values = struct.unpack("<I HHH H I H H I H BB II 10s6s 10s6s 10s6s 10s6s 10s6s 10s6s 10s6s 10s6s 16s16s16s16s16s16s16s16s 224s IIIIII III II II I IIIIII IIIII IIIIIIII", response.data)
+            keys = [
+                ####### DEBUG_DATA_X64_SYSTEM_CONTEXT
+                'exception_data',
+                ### Nested DEBUG_DATA_X64_FX_SAVE_STATE
+                'fcw', 'fsw', 'ftw',
+                'fop',
+                'fpu_ip',
+                'fcs',
+                'reserved1',
+                'fpu_dp',
+                'fds',
+                'reserved2_0', 'reserved2_1',
+                'mxcsr',
+                'mxcsr_mask',
+                'st0mm0', 'reserved3',
+                'st1mm1', 'reserved4',
+                'st2mm2', 'reserved5',
+                'st3mm3', 'reserved6',
+                'st4mm4', 'reserved7',
+                'st5mm5', 'reserved8',
+                'st6mm6', 'reserved9',
+                'st7mm7', 'reserved10',
+                'xmm0', 'xmm1', 'xmm2', 'xmm3',
+                'xmm4', 'xmm5', 'xmm6', 'xmm7',
+                'reserved11',
+                #####
+                'dr0', 'dr1', 'dr2', 'dr3', 'dr6', 'dr7',
+                'eflags',
+                'ldtr', 'tr',
+                'gdtr_0', 'gdtr_1',
+                'idtr_0', 'idtr_1',
+                'eip',
+                'gs', 'fs', 'es', 'ds', 'cs', 'ss',
+                'cr0', 'cr1', 'cr2', 'cr3', 'cr4',
+                'edi', 'esi', 'ebp', 'esp',
+                'edx', 'ecx', 'ebx', 'eax'
+            ]
+            self.target.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
+            registers = dict(zip(keys, values))
+        elif len(response.data) == 856:   # X64 CPU Context
+            values = struct.unpack("<Q HHHHIHHIHBBII10s6s10s6s10s6s10s6s10s6s10s6s10s6s10s6s16s16s16s16s16s16s16s16s16s16s16s16s16s16s16s16s96s QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ", response.data)
+            keys = [
+                ####### DEBUG_DATA_X64_SYSTEM_CONTEXT
+                'exception_data',
+                ### Nested DEBUG_DATA_X64_FX_SAVE_STATE
+                'fcw', 'fsw', 'ftw',
+                'fop',
+                'fpu_ip',
+                'fcs',
+                'reserved1',
+                'fpu_dp',
+                'fds',
+                'reserved2_0', 'reserved2_1',
+                'mxcsr',
+                'mxcsr_mask',
+                'st0mm0', 'reserved3',
+                'st1mm1', 'reserved4',
+                'st2mm2', 'reserved5',
+                'st3mm3', 'reserved6',
+                'st4mm4', 'reserved7',
+                'st5mm5', 'reserved8',
+                'st6mm6', 'reserved9',
+                'st7mm7', 'reserved10',
+                'xmm0', 'xmm1', 'xmm2', 'xmm3',
+                'xmm4', 'xmm5', 'xmm6', 'xmm7',
+                'xmm8', 'xmm9', 'xmm10', 'xmm11',
+                'xmm12', 'xmm13', 'xmm14', 'xmm15',
+                'reserved11',
+                #####
+                'dr0', 'dr1', 'dr2', 'dr3', 'dr6', 'dr7',
+                'eflags',
+                'ldtr', 'tr',
+                'gdtr_0', 'gdtr_1',
+                'idtr_0', 'idtr_1',
+                'eip',
+                'gs', 'fs', 'es', 'ds', 'cs', 'ss',
+                'cr0', 'cr1', 'cr2', 'cr3', 'cr4',
+                'rdi', 'rsi', 'rbp', 'rsp',
+                'rdx', 'rcx', 'rbx', 'rax',
+                'cr8',
+                'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15'
+            ]
+            self.target.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
+            registers = dict(zip(keys, values))
         return registers
 
     def write_register(self, register, value):

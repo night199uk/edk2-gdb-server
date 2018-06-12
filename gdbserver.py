@@ -57,6 +57,51 @@ class SharedLibrary(object):
 #### This should be generated from the packaged gdb xmls eventually
 # can be viewed in a running gdb with maint remote-registers
 architectures = {
+    'i386': {
+        'registers': [
+            {'name': 'eax', 'size': 4 },
+            {'name': 'ecx', 'size': 4 },
+            {'name': 'edx', 'size': 4 },
+            {'name': 'ebx', 'size': 4 },
+            {'name': 'esp', 'size': 4 },
+            {'name': 'ebp', 'size': 4 },
+            {'name': 'esi', 'size': 4 },
+            {'name': 'edi', 'size': 4 },
+            {'name': 'eip', 'size': 4 },
+            {'name': 'eflags', 'size': 4 },
+            {'name': 'cs', 'size': 4 },
+            {'name': 'ss', 'size': 4 },
+            {'name': 'ds', 'size': 4 },
+            {'name': 'es', 'size': 4 },
+            {'name': 'fs', 'size': 4 },
+            {'name': 'gs', 'size': 4 },
+            {'name': 'st0', 'size': 10 },
+            {'name': 'st1', 'size': 10 },
+            {'name': 'st2', 'size': 10 },
+            {'name': 'st3', 'size': 10 },
+            {'name': 'st4', 'size': 10 },
+            {'name': 'st5', 'size': 10 },
+            {'name': 'st6', 'size': 10 },
+            {'name': 'st7', 'size': 10 },
+            {'name': 'fctrl', 'size': 4 },
+            {'name': 'fstat', 'size': 4 },
+            {'name': 'ftag', 'size': 4 },
+            {'name': 'fiseg', 'size': 4 },
+            {'name': 'fioff', 'size': 4 },
+            {'name': 'foseg', 'size': 4 },
+            {'name': 'fooff', 'size': 4 },
+            {'name': 'fop', 'size': 4 },
+            {'name': 'xmm0', 'size': 16 },
+            {'name': 'xmm1', 'size': 16 },
+            {'name': 'xmm2', 'size': 16 },
+            {'name': 'xmm3', 'size': 16 },
+            {'name': 'xmm4', 'size': 16 },
+            {'name': 'xmm5', 'size': 16 },
+            {'name': 'xmm6', 'size': 16 },
+            {'name': 'xmm7', 'size': 16 },
+            {'name': 'mxcsr', 'size': 4 },
+        ]
+    },
     'i386:x86-64': {
         'registers': [
             {'name': 'rax', 'size': 8 },
@@ -141,7 +186,7 @@ class GdbHostStub(object):
             b'swbreak': True,
             b'hwbreak': True,
         }
-
+        self.architecture = 'i386'
         self.breakpoints = []
         self.packet_handlers = collections.defaultdict(int)
         self.general_query_xfer_handlers = collections.defaultdict(dict)
@@ -224,6 +269,11 @@ class GdbHostStub(object):
 
     def add_verbose_handler(self, cmd, handler):
         self.verbose_handlers[cmd] = handler
+
+    def set_architecture(self, architecture):
+        if not architecture in architectures.keys():
+            raise TypeError("unknown architecture")
+        self.architecture = architecture
 
     #### Top Level GDB Commands
     ###
@@ -381,7 +431,7 @@ class GdbHostStub(object):
             self.rsp.send_packet(b'E00')
             return
 
-        archdef = architectures['i386:x86-64']
+        archdef = architectures[self.architecture]
 
         register = archdef['registers'][index]
         register_name = register['name']
@@ -403,7 +453,7 @@ class GdbHostStub(object):
         raise NotImplementedError('implement GdbHostStub and override read_registers_impl')
 
     def read_registers(self, args):
-        archdef = architectures['i386:x86-64']
+        archdef = architectures[self.architecture]
 
         defaults = {}
         for register in archdef['registers']:
@@ -486,7 +536,7 @@ class GdbHostStub(object):
             self.rsp.send_packet(b'E00')
             return
 
-        archdef = architectures['i386:x86-64']
+        archdef = architectures[self.architecture]
 
         register = archdef['registers'][index]
         register_name = register['name']

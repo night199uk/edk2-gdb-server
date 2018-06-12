@@ -205,7 +205,7 @@ class UdkGdbStub(gdbserver.GdbHostStub):
         logger.warn("target reset()")
         target = xml.etree.ElementTree.Element('target', version='1.0')
         architecture = xml.etree.ElementTree.SubElement(target, 'architecture')
-        architecture.text = 'i386:x86-64'
+        architecture.text = self.architecture
         target_xml = xml.etree.ElementTree.tostring(target, encoding='utf-8', method='xml')
 
         self.set_xml(b'features', b'target.xml', target_xml)
@@ -610,7 +610,7 @@ class UdkStub(udkserver.UdkTargetStub):
 
 
 class UdkGdbServer():
-    def __init__(self, serial_name = '/dev/pts/1', host = '0.0.0.0', port = 1234):
+    def __init__(self, serial_name = '/dev/cu.usbmodem357', host = '0.0.0.0', port = 1234):
         self._serial_name = serial_name
         self._serial = None
 
