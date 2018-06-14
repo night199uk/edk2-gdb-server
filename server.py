@@ -610,7 +610,7 @@ class UdkStub(udkserver.UdkTargetStub):
 
 
 class UdkGdbServer():
-    def __init__(self, serial_name = '/dev/cu.usbmodem357', host = '0.0.0.0', port = 1234):
+    def __init__(self, serial_name = '/dev/ttyGS0', host = '0.0.0.0', port = 1234):
         self._serial_name = serial_name
         self._serial = None
 
@@ -649,7 +649,7 @@ class UdkGdbServer():
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._socket.bind((self._host, self._port))
-        self._socket.listen(0)
+        self._socket.listen(10)
         self.add_poll_fd(self._socket.fileno(), self.socket_handler)
         logger.info("Listening on {}:{} for connections".format(self._host, self._port))
 
