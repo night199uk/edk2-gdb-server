@@ -200,6 +200,8 @@ class UdkGdbStub(gdbserver.GdbHostStub):
 
         self.add_feature(b'qXfer:features:read', True)
         self.add_feature(b'qXfer:libraries:read', True)
+        self.add_general_query_xfer_handler(b'read', b'features', b'target.xml', self.target_xml)
+        self.add_general_query_xfer_handler(b'read', b'libraries', b'', self.libraries_xml)
 
         self.reset()
         self.udk.connect(self)
@@ -209,33 +211,33 @@ class UdkGdbStub(gdbserver.GdbHostStub):
         Called when the UDK Target Reboots to re-initialize any transient GDB state
         """
         logger.warn("target reset()")
-        target = xml.etree.ElementTree.Element('target', version='1.0')
-        architecture = xml.etree.ElementTree.SubElement(target, 'architecture')
-        architecture.text = self.architecture
-        target_xml = xml.etree.ElementTree.tostring(target, encoding='utf-8', method='xml')
-
-        self.set_xml(b'features', b'target.xml', target_xml)
-
-        self.libraries_xml = xml.etree.ElementTree.Element('library-list')
-        self.set_xml(b'libraries', b'', xml.etree.ElementTree.tostring(self.libraries_xml, encoding='utf-8', method='xml'))
         for i, breakpoint in enumerate(self.breakpoints):
             if breakpoint.state == gdbserver.BreakpointState.BP_ACTIVE:
                 breakpoint.state = gdbserver.BreakpointState.BP_SET
                 breakpoint.first_byte = None
             elif breakpoint.state == gdbserver.BreakpointState.BP_REMOVED:
                 del self.breakpoints[i]
+        self.libraries = xml.etree.ElementTree.Element('library-list')
 
     def add_library(self, library, segment, sections = None):
         """Add Library
         Called when the target loads shared library that should be recorded for GDB.
         """
-        library = xml.etree.ElementTree.SubElement(self.libraries_xml, 'library', name = library)
+        library = xml.etree.ElementTree.SubElement(self.libraries, 'library', name = library)
         if not sections:
             xml.etree.ElementTree.SubElement(library, 'segment', address='0x{0:x}'.format(segment))
         else:
             for section in sections:
                 xml.etree.ElementTree.SubElement(library, 'section', address='0x{0:x}'.format(section.address))
-        self.set_xml(b'libraries', b'', xml.etree.ElementTree.tostring(self.libraries_xml, encoding='utf-8', method='xml'))
+
+    def target_xml(self):
+        target = xml.etree.ElementTree.Element('target', version='1.0')
+        architecture = xml.etree.ElementTree.SubElement(target, 'architecture')
+        architecture.text = self.architecture
+        return xml.etree.ElementTree.tostring(target, encoding='utf-8', method='xml')
+
+    def libraries_xml(self):
+        return xml.etree.ElementTree.tostring(self.libraries, encoding='utf-8', method='xml')
 
     def ensure_breakpoints(self):
         for i, breakpoint in enumerate(self.breakpoints):

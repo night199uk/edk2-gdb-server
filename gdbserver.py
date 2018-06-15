@@ -189,7 +189,8 @@ class GdbHostStub(object):
         self.architecture = 'i386'
         self.breakpoints = []
         self.packet_handlers = collections.defaultdict(int)
-        self.general_query_xfer_handlers = collections.defaultdict(dict)
+        recursive_defaultdict = lambda: collections.defaultdict(recursive_defaultdict)  # Create a recursive defaultdict
+        self.general_query_xfer_handlers = recursive_defaultdict()
 
         #### Standard Packet Handlers
         self.add_packet_handler(b'!', self.extended_mode)
@@ -260,8 +261,8 @@ class GdbHostStub(object):
     def add_general_query_handler(self, cmd, handler):
         self.general_query_handlers[cmd] = handler
 
-    def add_general_query_xfer_handler(self, obj, operation, handler):
-        self.general_query_xfer_handlers[obj][operation] = handler
+    def add_general_query_xfer_handler(self, operation, obj, annex, handler):
+        self.general_query_xfer_handlers[operation][obj][annex] = handler
 
     def add_general_set_handler(self, cmd, handler):
         self.general_set_handlers[cmd] = handler
@@ -626,22 +627,17 @@ class GdbHostStub(object):
         offset = int(offset, 16)
         length = int(length, 16)
 
-        if operation == b'read':
-            xml = None
-            try:
-                xml = self.xmls[obj][annex]
-            except KeyError:
-                self.rsp.send_packet(b'E02')  # No such file or directory
+        if operation not in self.general_query_xfer_handlers or \
+           obj not in self.general_query_xfer_handlers[operation] or \
+           annex not in self.general_query_xfer_handlers[operation][obj]:
+            self.rsp.send_packet(b'E02')  # No such file or directory
 
-            packet = b'm'       # More follows
-            end = offset + length
-            if offset > len(xml) or end > len(xml):
-                packet = b'l'   # Last
-            self.rsp.send_packet(packet + xml[offset:end])
-        else:
-            logger.error('requested xfer operation not supported: {}:{}'.format(obj, operation))
-            self.rsp.send_packet(b'')
-
+        xml = self.general_query_xfer_handlers[operation][obj][annex]()
+        packet = b'm'       # More follows
+        end = offset + length
+        if offset > len(xml) or end > len(xml):
+            packet = b'l'   # Last
+        self.rsp.send_packet(packet + xml[offset:end])
 
     #### Trace support
     ### Trace variables not currently used
