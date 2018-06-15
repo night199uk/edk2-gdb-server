@@ -774,18 +774,18 @@ class UdkTargetStub(object):
         request = struct.pack('<B', register.value)
         response = self.target.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_READ_REGISTER, 0, request)
         self.target.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
-        size = self.register_size(register)
+        # size = self.register_size(register)
 
         value = None
-        if size == 2:
+        if len(response.data) == 2:
             value, = struct.unpack("<H", response.data)
-        elif size == 4:
+        elif len(response.data) == 4:
             value, = struct.unpack("<I", response.data)
-        elif size == 8:
+        elif len(response.data) == 8:
             value, = struct.unpack("<Q", response.data)
-        elif size == 10:
+        elif len(response.data) == 10:
             raise NotImplementedError
-        elif size == 16:
+        elif len(response.data) == 16:
             value1, value2, = struct.unpack("<QQ", response.data)
             value = (value1 << 64) | value2
 
