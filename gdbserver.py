@@ -634,21 +634,15 @@ class GdbHostStub(object):
         if operation == b'read':
             xml = None
             try:
-                packet = b'm'
-
                 xml = self.xmls[obj][annex]
-                if offset > len(xml):
-                    self.rsp.send_packet(b'l')
-                    return
-
-                end = offset + length
-                if end > len(xml):
-                    packet = b'l'
-                    end = len(xml)
-
-                self.rsp.send_packet(packet + xml[offset:end])
             except KeyError:
-                self.rsp.send_packet(b'E02') # No such file or directory
+                self.rsp.send_packet(b'E02')  # No such file or directory
+
+            packet = b'm'       # More follows
+            end = offset + length
+            if offset > len(xml) or end > len(xml):
+                packet = b'l'   # Last
+            self.rsp.send_packet(packet + xml[offset:end])
         else:
             logger.error('requested xfer operation not supported: {}:{}'.format(obj, operation))
             self.rsp.send_packet(b'')
