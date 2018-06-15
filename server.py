@@ -174,6 +174,12 @@ class LoadedImagePrivateData(ctypes.Structure):
                 ('image_context', PeCoffLoaderImageContext)]
 
 class UdkGdbStub(gdbserver.GdbHostStub):
+    """UdkGdbStub - implement a UDK aware GDB stub
+
+    This is one half of the UDK GDB server; implementing the non-generic GDB stub specialized to UDK.
+    This contains functions to call the GDB aware UDK stub, UdkStub. The two modules interact, with this
+    module mostly responsible for the GDB side of any conversions.
+    """
     def __init__(self, rsp, udk):
         super(UdkGdbStub, self).__init__(rsp)
         self.udk = udk
@@ -512,10 +518,7 @@ class UdkStub(udkserver.UdkTargetStub):
     ### Called by UDK Server when memory is ready on the target
     def handle_break_point_impl(self):
         (cause, nr) = self.handle_break_cause()
-        try:
-            self.gdb.rsp.send_stop_reply_packet(cause, nr)
-        except AttributeError:
-            pass
+        self.gdb.rsp.send_stop_reply_packet(cause, nr)
 
     ### Called to generate a response when the target is stopped at a SW breakpoint
     def handle_break_cause_sw_breakpoint_impl(self, stop_address):
@@ -663,7 +666,8 @@ class UdkGdbServer():
 #        signal.pause()
 
         while True:
-            for (fd, event) in self._poll.poll():
+            events = self._poll.poll()
+            for (fd, event) in events:
                 if event & (select.POLLHUP | select.POLLERR | select.POLLNVAL):
                     self.remove_poll_fd(fd)
                     self.gdb = None

@@ -251,7 +251,6 @@ class GdbHostStub(object):
 
         self.add_verbose_handler(b'Kill', self.vkill)
 
-
     def add_feature(self, feature, value = True):
         self.features[feature] = value
 
@@ -455,11 +454,7 @@ class GdbHostStub(object):
     def read_registers(self, args):
         archdef = architectures[self.architecture]
 
-        defaults = {}
-        for register in archdef['registers']:
-            register_name = register['name']
-            defaults[register_name] = 0
-
+        defaults = { register['name']: 0 for register in archdef['registers'] }
         values = self.read_registers_impl(defaults)
 
         s = b''
@@ -476,7 +471,7 @@ class GdbHostStub(object):
         self.rsp.send_packet(s)
 
     def send_break_impl(self):
-        raise NotImplementedError("implement GdbHostStub and override send_break")
+        raise NotImplementedError("implement GdbHostStub and override send_break_impl")
 
     def send_break(self, args):
         (cause, nr) = self.send_break_impl()
@@ -486,7 +481,7 @@ class GdbHostStub(object):
         self.rsp.send_packet(b'OK')
 
     def step_instruction_impl(self):
-        raise NotImplementedError("implement GdbHostStub and override send_break")
+        raise NotImplementedError("implement GdbHostStub and override step_instruction_impl")
 
     def step_instruction(self, args):
         """'s [addr]'
@@ -498,7 +493,7 @@ class GdbHostStub(object):
         self.rsp.send_stop_reply_packet(cause, nr)
 
     def step_instruction_with_signal_impl(self):
-        raise NotImplementedError("implement GdbHostStub and override send_break")
+        raise NotImplementedError("implement GdbHostStub and override step_instruction_with_signal_impl")
 
     def step_instruction_with_signal(self, args):
         """‘S sig[;addr]’

@@ -604,7 +604,7 @@ class UdkTargetStub(object):
         except KeyError:
             return (5, {})
 
-    def handle_break_cause_image_load_impl(self, pdb_name, image_context):
+    def handle_break_cause_image_load_impl(self, pdb_name_addr, image_context_addr):
         raise NotImplementedError("implement UdkHostStub and override handle_break_cause_image_load")
 
     def handle_break_cause_image_load(self, stop_address):
@@ -681,7 +681,7 @@ class UdkTargetStub(object):
         cause, stop_address = struct.unpack("<BQ", response.data)
         self.target.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
         logger.debug("BreakCause() returning : Cause = {} StopAddress = 0x{:0>16x}".format(cause, stop_address))
-        return (cause, stop_address)
+        return cause, stop_address
 
     def get_revision(self):
         logger.debug("QueryRevision() called")
@@ -689,6 +689,7 @@ class UdkTargetStub(object):
         revision, capabilities = struct.unpack("<II", response.data)
         self.target.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
         logger.debug("QueryRevision() returning : Revision = {} Capability = {}".format(revision, capabilities))
+        return revision, capabilities
 
     def get_viewpoint(self):
         logger.debug("IGetViewpoint() called")
@@ -704,7 +705,7 @@ class UdkTargetStub(object):
         vector, data, = struct.unpack("<BI", response.data)
         self.target.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
         logger.debug("GetException() returning : Exception = {} Data = {!s}".format(vector, data))
-        return (vector, data)
+        return vector, data
 
     def memory_ready(self):
         logger.debug("MemoryReady() called")
@@ -718,7 +719,7 @@ class UdkTargetStub(object):
         request = struct.pack("<II", eax, ecx)
         response = self.target.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_CPUID, 0, request)
         (eax, ebx, ecx, edx) = struct.unpack("<IIII", response.data)
-        return (eax, ebx, ecx, edx)
+        return eax, ebx, ecx, edx
 
     def put_debugger_setting(self, key, value):
         logger.debug("PutDebuggerSetting() called: Key = {} Value = {}".format(key, value))
@@ -791,9 +792,29 @@ class UdkTargetStub(object):
         logger.debug("ReadRegister() returning : Register {0} Value = 0x{1:x}".format(register.name, value))
         return value
 
+    def write_register(self, register, value):
+        logger.debug("WriteRegister() returning : Register {} Value = {}".format(register.name, value))
+        size = self.register_size(register)
+        request = struct.pack('<BB', register.value, size)
+        data = None
+        if size == 2:
+            data = struct.pack("<H", value)
+        elif size == 4:
+            data = struct.pack("<I", value)
+        elif size == 8:
+            data = struct.pack("<Q", value)
+        elif size == 10:
+            raise NotImplementedError
+        elif size == 16:
+            data = struct.pack("<QQ", *value)
+
+        response = self.target.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_READ_REGISTER, 0, request + data)
+        self.target.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
+        logger.debug("WriteRegister() called")
+
     def read_registers(self):
         response = self.target.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_READ_ALL_REGISTERS, 0)
-        logger.debug(str(len(response.data)))
+        logger.debug("ReadRegister(): received a cpu saved state structure with length: {}".format(len(response.data)))
         if len(response.data) == 648:   # IA32 CPU Context
             values = struct.unpack("<I HHH H I H H I H BB II 10s6s 10s6s 10s6s 10s6s 10s6s 10s6s 10s6s 10s6s 16s16s16s16s16s16s16s16s 224s IIIIII III II II I IIIIII IIIII IIIIIIII", response.data)
             keys = [
@@ -833,8 +854,8 @@ class UdkTargetStub(object):
                 'edi', 'esi', 'ebp', 'esp',
                 'edx', 'ecx', 'ebx', 'eax'
             ]
-            self.target.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
             registers = dict(zip(keys, values))
+            self.target.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
         elif len(response.data) == 856:   # X64 CPU Context
             values = struct.unpack("<Q HHHHIHHIHBBII10s6s10s6s10s6s10s6s10s6s10s6s10s6s10s6s16s16s16s16s16s16s16s16s16s16s16s16s16s16s16s16s96s QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ", response.data)
             keys = [
@@ -878,29 +899,9 @@ class UdkTargetStub(object):
                 'cr8',
                 'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15'
             ]
-            self.target.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
             registers = dict(zip(keys, values))
+            self.target.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
         return registers
-
-    def write_register(self, register, value):
-        logger.debug("WriteRegister() returning : Register {} Value = {}".format(register.name, value))
-        size = self.register_size(register)
-        request = struct.pack('<BB', register.value, size)
-        data = None
-        if size == 2:
-            data = struct.pack("<H", value)
-        elif size == 4:
-            data = struct.pack("<I", value)
-        elif size == 8:
-            data = struct.pack("<Q", value)
-        elif size == 10:
-            raise NotImplementedError
-        elif size == 16:
-            data = struct.pack("<QQ", *value)
-
-        response = self.target.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_READ_REGISTER, 0, request + data)
-        self.target.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
-        logger.debug("WriteRegister() called")
 
     #### Utilities
     def read_null_terminated_string(self, addr, max_size = 1024):
