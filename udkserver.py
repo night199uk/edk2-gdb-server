@@ -780,6 +780,9 @@ class UdkTargetStub(object):
         elif register <= Register.SOFT_DEBUGGER_REGISTER_XMM15:
             return 16
         else:
+            #
+            # MMX register
+            #
             return 8
 
     def read_register(self, register):
