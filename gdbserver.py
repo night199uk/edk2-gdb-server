@@ -547,6 +547,13 @@ class GdbHostStub(object):
             self.rsp.send_packet(b'E00')
             return
 
+        #
+        # Transparently drop Linux' orig_eax used for syscalls.
+        #
+        if index == 41:
+            self.rsp.send_packet(b'OK')
+            return
+
         archdef = architectures[self.architecture]
 
         register = archdef['registers'][index]
