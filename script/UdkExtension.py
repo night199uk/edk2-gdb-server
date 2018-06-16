@@ -20,7 +20,7 @@ def WriteMsr(Index, Value):
 def ReadIo(Address, Size):
     return UdkCommandHelper.string_to_long(
              UdkCommandHelper.sendUdkExtensionPacket("io%x,%x" % (Address, Size))
-             );
+             )
 
 def WriteIo(Address, Size, Value):
     response = UdkCommandHelper.sendUdkExtensionPacket("IO%x,%x:%s" % (Address, Size, UdkCommandHelper.long_to_string(Value, Size)))

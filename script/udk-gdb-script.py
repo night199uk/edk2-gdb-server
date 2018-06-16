@@ -1,41 +1,3 @@
-#
-# This file contains an 'Intel Peripheral Driver' and is
-# licensed for Intel CPUs and chipsets under the terms of your
-# license agreement with Intel or your vendor.  This file may
-# be modified by the user, subject to additional terms of the
-# license agreement
-#
-# ATTENTION: The most scripts are written in python language which is supported
-#            by GDB 7.0 offical. So you need use GDB later than 7.0.
-#
-# Copyright (c) 2010 - 2015, Intel Corporation. All rights reserved.<BR>
-#
-#   This software and associated documentation (if any) is furnished
-#   under a license and may only be used or copied in accordance
-#   with the terms of the license. Except as permitted by such
-#   license, no part of this software or documentation may be
-#   reproduced, stored in a retrieval system, or transmitted in any
-#   form or by any means without the express written consent of
-#   Intel Corporation.
-
-################################################################################
-# Configure GDB
-################################################################################
-set remotetimeout 20
-set disassemble-next-line auto
-set step-mode on
-set disassembly-flavor intel
-set height 0
-#set prompt (udb) 
-
-define hook-stop
-  stop-handler
-end
-
-################################################################################
-# Python Scripts
-################################################################################
-python
 import sys
 import os
 import re
@@ -44,11 +6,7 @@ import traceback
 import datetime
 import inspect
 
-#
-# Update the Python path (Below strings will be modified during installation to reflect the actual installation directory).
-#
-
-script_path = sys.argv[0]
+script_path = os.path.dirname(__file__)
 if script_path not in sys.path:
 	sys.path.insert(0, script_path)
 	sys.path.insert(0, script_path + '/py')
@@ -64,13 +22,14 @@ from imp import reload
 from UdkMessage import *
 
 class Edk2Py(gdb.Command):
-    """Execute the Python function: py [/h] [/t] Module[.Function] [Arguments].
-/h to show the help of the function.
-/t to show the execution time.
-Module is the Python module where Function can be located.
-Function is the Python function to be executed, Function is "invoke" if omitted.
-Arguments will be passed to Function as the parameter."""
-
+    """
+    Execute the Python function: py [/h] [/t] Module[.Function] [Arguments].
+    /h to show the help of the function.
+    /t to show the execution time.
+    Module is the Python module where Function can be located.
+    Function is the Python function to be executed, Function is "invoke" if omitted.
+    Arguments will be passed to Function as the parameter.
+    """
     def __init__(self):
         super(Edk2Py, self).__init__("py", gdb.COMMAND_FILES, gdb.COMPLETE_NONE)
 
@@ -122,10 +81,11 @@ Arguments will be passed to Function as the parameter."""
 Edk2Py()
 
 class Edk2Cpuid(gdb.Command):
-    """Retrieves CPUID information: cpuid [INDEX] [SUBINDEX].
-INDEX is the value of EAX priori to executing CPUID instruction (defaults to 1).
-SUBINDEX is the value of ECX priori to executing CPUID instruction (defaults to 0)."""
-
+    """
+    Retrieves CPUID information: cpuid [INDEX] [SUBINDEX].
+    INDEX is the value of EAX priori to executing CPUID instruction (defaults to 1).
+    SUBINDEX is the value of ECX priori to executing CPUID instruction (defaults to 0).
+    """
     def __init__(self):
         super(Edk2Cpuid, self).__init__("cpuid", gdb.COMMAND_DATA, gdb.COMPLETE_NONE)
 
@@ -160,11 +120,12 @@ SUBINDEX is the value of ECX priori to executing CPUID instruction (defaults to 
 Edk2Cpuid()
 
 class Edk2Io(gdb.Command):
-    """Access IO: io/SIZE PORT [VALUE].
-PORT is an expression for the IO address to Access.
-SIZE letters are b(byte), h(halfword), w(word).
-VALUE is an expression to write to the PORT."""
-
+    """
+    Access IO: io/SIZE PORT [VALUE].
+    PORT is an expression for the IO address to Access.
+    SIZE letters are b(byte), h(halfword), w(word).
+    VALUE is an expression to write to the PORT.
+    """
     def __init__(self, command_str = "io", command_class = gdb.COMMAND_DATA, complete_type = gdb.COMPLETE_NONE):
         super(Edk2Io, self).__init__(command_str, command_class, complete_type)
 
@@ -204,14 +165,15 @@ VALUE is an expression to write to the PORT."""
 Edk2Io()
 
 class Edk2IoWatch(Edk2Io):
-    """Set a watchpoint for an IO address.
-Usage: iowatch/SIZE PORT
-A watchpoint stops execution of your program whenever the
-IO address is either read or written.
-PORT is an expression for the IO address to Access.
-SIZE letters are b(byte), h(halfword), w(word).
-VALUE is an expression to write to the PORT."""
-
+    """
+    Set a watchpoint for an IO address.
+    Usage: iowatch/SIZE PORT
+    A watchpoint stops execution of your program whenever the
+    IO address is either read or written.
+    PORT is an expression for the IO address to Access.
+    SIZE letters are b(byte), h(halfword), w(word).
+    VALUE is an expression to write to the PORT.
+    """
     def __init__(self):
         super(Edk2IoWatch, self).__init__("iowatch", gdb.COMMAND_DATA, gdb.COMPLETE_NONE)
         self._watchpoints = {}
@@ -486,6 +448,7 @@ class Edk2ImageLoader:
             if addr >= sym[0] and addr < sym[1]:
                 return True
         return False
+ImageLoader = Edk2ImageLoader()
 
 class Edk2LoadThis(gdb.Command):
     """Load debug symbol for the given address: loadthis [Address].
@@ -510,6 +473,7 @@ If no argument is given, the command loads debug symbol for the current instruct
                     return
             print(LOADING_SYMBOL % cur)
             self._imageloader.loadsymbol(cur, True)
+Edk2LoadThis(ImageLoader) # loadthis
 
 class Edk2LoadAll(gdb.Command):
     """Load symbols for all loaded modules.
@@ -534,6 +498,7 @@ class Edk2LoadAll(gdb.Command):
                 self._imageloader.loadsymbol(int(image_entry, 16), False, False)
             else:
                 print(SKIPPING_SYMBOL_FOR_MODULE % (image_base, image_name))
+Edk2LoadAll(ImageLoader) # loadall
 
 class Edk2InfoModules(gdb.Command):
     """List information of the loaded modules or the specified module(s).
@@ -568,6 +533,14 @@ class Edk2InfoModules(gdb.Command):
             if image_name.lower().startswith(word.lower()):
                 suggestion.append(image_name)
         return suggestion
+Edk2InfoModules()  # info module
+
+def Edk2StopHandler2(event):
+    gdb.execute("refresharch")
+    if not UdkCommandHelper.supportExpat():
+        gdb.execute("loadthis")
+    gdb.execute("info exception")
+#gdb.events.stop.connect(Edk2StopHandler2)
 
 class Edk2StopHandler(gdb.Command):
     """Command to be run when target is stopped.
@@ -580,10 +553,7 @@ class Edk2StopHandler(gdb.Command):
         args = UdkCommandHelper.checkParameter(arg, 0)
         if args == None:
             return
-        gdb.execute("refresharch")
-        if not UdkCommandHelper.supportExpat():
-            gdb.execute("loadthis")
-        gdb.execute("info exception")
+        Edk2StopHandler2(None)
 Edk2StopHandler()
 
 class Edk2DebugScript(gdb.Command):
@@ -608,32 +578,33 @@ class Edk2DebugScript(gdb.Command):
 Edk2DebugScript()
 
 try:
+    gdb.execute("set remotetimeout 20")
+    gdb.execute("set disassemble-next-line auto")
+    gdb.execute("set step-mode on")
+    gdb.execute("set disassembly-flavor intel")
+    gdb.execute("set height 0")
+    gdb.execute("set prompt (udb) ")
     print(SCRIPT_BANNER_BEGIN)
     # exception raised when GdbServer is not connected
-    gdb.selected_frame()
+    #print("select_frame")
+    #gdb.selected_frame()
 
     # provide additional command when gdb doesn't support Expat
     if UdkCommandHelper.supportExpat():
-        print(SUPPORT_PENDING_BREAKPOINTS)
+       print(SUPPORT_PENDING_BREAKPOINTS)
     else:
-        print(NOT_SUPPORT_PENDING_BREAKPOINTS)
-    Edk2InfoModules()  # info module
-    ImageLoader = Edk2ImageLoader()
-    Edk2LoadThis(ImageLoader) # loadthis
-    Edk2LoadAll(ImageLoader) # loadall
+       print(NOT_SUPPORT_PENDING_BREAKPOINTS)
     print(SCRIPT_BANNER_END)
 
     # Set loadimageat an alias to loadthis to keep backward compatibility
-    gdb.execute("alias loadimageat=loadthis")
+    #gdb.execute("alias loadimageat=loadthis")
 
     # Run the hook-stop script
-    gdb.execute("stop-handler")
+    # gdb.execute("stop-handler")
 
     # force to load the shared library in the first time
-    gdb.execute("sharedlibrary")
+    # gdb.execute("sharedlibrary")
+
 except:
     print(GDBSERVER_NOT_CONNECTED)
     print(SCRIPT_BANNER_END)
-
-# End of python
-end
