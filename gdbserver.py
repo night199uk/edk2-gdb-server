@@ -197,8 +197,9 @@ class GdbHostStub(object):
         self.add_packet_handler(b'\x03', self.send_break)
         self.add_packet_handler(b'c', self.continue_execution)
         self.add_packet_handler(b'C', self.continue_execution_with_signal)
+        self.add_packet_handler(b'D', self.detach)
         self.add_packet_handler(b'g', self.read_registers)
-        self.add_packet_handler(b'k', self.disconnect)
+        self.add_packet_handler(b'k', self.kill)
         self.add_packet_handler(b'm', self.read_memory)
         self.add_packet_handler(b'M', self.write_memory)
         self.add_packet_handler(b'p', self.read_register)
@@ -381,11 +382,11 @@ class GdbHostStub(object):
         sig = int(sig, 16)
         self.continue_execution_with_signal_impl(sig, addr)
 
-    def disconnect_impl(self, sig, addr):
+    def detach_impl(self, sig, addr):
         raise NotImplementedError("implement GdbHostStub and override disconnect_impl")
 
-    def disconnect(self, args):
-        self.disconnect_impl()
+    def detach(self, args):
+        self.detach_impl()
         return False
 
     def extended_mode(self, args):
@@ -504,6 +505,20 @@ class GdbHostStub(object):
         Reply: See Stop Reply Packets, for the reply specifications."""
         self.step_instruction_with_signal_impl()
 #        self.rsp.send_stop_reply_packet(cause, nr)
+
+    def kill_impl(self):
+        raise NotImplementedError("implement GdbHostStub and override kill_impl")
+
+    def kill(self, args):
+        """'k'
+        Kill request. The exact effect of this packet is not specified.
+        For a bare-metal target, it may power cycle or reset the target system. For that reason, the ‘k’ packet has no reply.
+        For a single-process target, it may kill that process if possible.
+        A multiple-process target may choose to kill just one process, or all that are under GDB’s control. For more precise control, use the vKill packet (see vKill packet).
+        If the target system immediately closes the connection in response to ‘k’, GDB does not consider the lack of packet acknowledgment to be an error, and assumes the kill was successful.
+        If connected using target extended-remote, and the target does not close the connection in response to a kill request, GDB probes the target state as if a new connection was opened (see ? packet).
+        """
+        self.kill_impl()
 
     def vkill(self, args):
         pass
@@ -769,7 +784,7 @@ class GdbRemoteSerialProtocol(object):
         return sum & 0xff
 
     def close(self):
-        self.send_packet('k')
+        # self.send_packet('D')
         self.connection.close()
 
     def __del__(self):

@@ -276,7 +276,7 @@ class UdkGdbStub(gdbserver.GdbHostStub):
         self.ensure_breakpoints()
         self.udk.go()
 
-    def disconnect_impl(self):
+    def detach_impl(self):
         self.udk.detach()
         return False
 
@@ -292,6 +292,9 @@ class UdkGdbStub(gdbserver.GdbHostStub):
         breakpoint = gdbserver.Breakpoint(address)
         breakpoint.state = gdbserver.BreakpointState.BP_SET
         self.breakpoints.append(breakpoint)
+
+    def kill_impl(self):
+        self.udk.reset()
 
     def remove_breakpoint_impl(self, index, address, kind):
         logger.info("removing breakpoint: index: {}, address: {}".format(index, address))
