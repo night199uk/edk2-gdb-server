@@ -318,11 +318,9 @@ class Edk2RefreshArchitecture(gdb.Command):
             return
 
         response = UdkCommandHelper.sendUdkExtensionPacket("arch")
-
-        if response == "use32":
-            UdkCommandHelper.executeCommand("set architecture i386")
-        elif response == "use64":
-            UdkCommandHelper.executeCommand("set architecture i386:x86-64")
+        valid_architectures = ['i386', 'i386:x86-64']
+        if response in valid_architectures:
+            UdkCommandHelper.executeCommand("set architecture {}".format(response))
 Edk2RefreshArchitecture()
 
 class Edk2SmmEntryBreak(gdb.Command):

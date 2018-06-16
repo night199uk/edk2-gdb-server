@@ -217,7 +217,12 @@ class UdkGdbStub(gdbserver.GdbHostStub):
                 breakpoint.first_byte = None
             elif breakpoint.state == gdbserver.BreakpointState.BP_REMOVED:
                 del self.breakpoints[i]
+        if self.udk.arch == udkserver.CpuArch.DEBUG_DATA_BREAK_CPU_ARCH_IA32:
+            self.set_architecture('i386')
+        elif self.udk.arch == udkserver.CpuArch.DEBUG_DATA_BREAK_CPU_ARCH_X64:
+            self.set_architecture('i386:x86_x64')
         self.libraries = xml.etree.ElementTree.Element('library-list')
+
 
     def add_library(self, library, segment, sections = None):
         """Add Library
@@ -314,9 +319,9 @@ class UdkGdbStub(gdbserver.GdbHostStub):
     ### Called by GDB to read the register state from the target
     def read_registers_impl(self, defaults):
         registers = self.udk.read_registers()
-        registers['rip'] = registers['eip']
+        # gdb has different register names to UDK; translate
         registers['fctrl'] = registers['fcw']
-        registers['fstat'] = registers['fcw']
+        registers['fstat'] = registers['fsw']
         registers['ftag'] = registers['ftw']
         registers['fiseg'] = registers['fcs']
         registers['fioff'] = registers['fpu_ip']
@@ -330,6 +335,21 @@ class UdkGdbStub(gdbserver.GdbHostStub):
         registers['st5'] = registers['st5mm5']
         registers['st6'] = registers['st6mm6']
         registers['st7'] = registers['st7mm7']
+        del registers['fcw']
+        del registers['fsw']
+        del registers['ftw']
+        del registers['fcs']
+        del registers['fpu_ip']
+        del registers['fds']
+        del registers['fpu_dp']
+        del registers['st0mm0']
+        del registers['st1mm1']
+        del registers['st2mm2']
+        del registers['st3mm3']
+        del registers['st4mm4']
+        del registers['st5mm5']
+        del registers['st6mm6']
+        del registers['st7mm7']
         return registers
 
     ### Called by GDB to halt the target from running
@@ -375,7 +395,11 @@ class UdkGdbStub(gdbserver.GdbHostStub):
             self.rsp.send_packet(b'')
 
     def udk_extension_arch(self, args):
-        self.rsp.send_packet(b'use64')
+        if self.udk.arch == udkserver.CpuArch.DEBUG_DATA_BREAK_CPU_ARCH_IA32:
+            self.set_architecture('i386')
+        elif self.udk.arch == udkserver.CpuArch.DEBUG_DATA_BREAK_CPU_ARCH_X64:
+            self.set_architecture('i386:x86_x64')
+        self.rsp.send_packet(self.architecture.encode('utf-8'))
 
     def udk_extension_exception(self, args):
         (vector, error_code) = self.udk.get_exception()

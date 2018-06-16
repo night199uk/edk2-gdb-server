@@ -114,6 +114,10 @@ class BreakCauses(enum.IntEnum):
 
 SOFT_DEBUGGER_REGISTER_FP_BASE         =    0x30
 
+class CpuArch(enum.IntEnum):
+    DEBUG_DATA_BREAK_CPU_ARCH_IA16 =    0x00
+    DEBUG_DATA_BREAK_CPU_ARCH_IA32 =    0x01
+    DEBUG_DATA_BREAK_CPU_ARCH_X64  =    0x02
 
 #
 #  IA-32/x64 processor register index table
@@ -532,6 +536,7 @@ class UdkTarget(object):
 class UdkTargetStub(object):
     def __init__(self, target):
         self.target = target
+        self.arch = CpuArch.DEBUG_DATA_BREAK_CPU_ARCH_IA32
         self.handlers = {}
         self.add_handler(DebugCommands.DEBUG_COMMAND_INIT_BREAK, self.handle_init_break)
         self.add_handler(DebugCommands.DEBUG_COMMAND_ATTACH_BREAK, self.handle_attach_break)
@@ -565,7 +570,8 @@ class UdkTargetStub(object):
 #        self.put_debugger_setting(DEBUG_AGENT_SETTING_SMM_ENTRY_BREAK, 0)  # Trace setting
 #        self.put_debugger_setting(DEBUG_AGENT_SETTING_BOOT_SCRIPT_ENTRY_BREAK, 0)  # Trace setting
         self.get_viewpoint()
-        ready = self.memory_ready()
+        self.arch = self.arch_mode()
+#        ready = self.memory_ready()
 #        if not ready:
 #            self.go()
 
@@ -576,6 +582,7 @@ class UdkTargetStub(object):
 #        self.put_debugger_setting(DEBUG_AGENT_SETTING_SMM_ENTRY_BREAK, 0)  # Trace setting
 #        self.put_debugger_setting(DEBUG_AGENT_SETTING_BOOT_SCRIPT_ENTRY_BREAK, 0)  # Trace setting
         self.get_viewpoint()
+        self.arch = self.arch_mode()
         ready = self.memory_ready()
         if not ready:
             self.go()
@@ -597,6 +604,7 @@ class UdkTargetStub(object):
 
     def handle_break_cause(self):
         self.get_viewpoint()
+        self.arch = self.arch_mode()
         cause, stop_address = self.break_cause()
         try:
             value = self.break_cause_handlers[cause](stop_address)
@@ -891,7 +899,7 @@ class UdkTargetStub(object):
                 'ldtr', 'tr',
                 'gdtr_0', 'gdtr_1',
                 'idtr_0', 'idtr_1',
-                'eip',
+                'rip',
                 'gs', 'fs', 'es', 'ds', 'cs', 'ss',
                 'cr0', 'cr1', 'cr2', 'cr3', 'cr4',
                 'rdi', 'rsi', 'rbp', 'rsp',
@@ -902,6 +910,13 @@ class UdkTargetStub(object):
             registers = dict(zip(keys, values))
             self.target.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
         return registers
+
+    def arch_mode(self):
+        response = self.target.send_command_and_wait_for_ack_ok(DebugCommands.DEBUG_COMMAND_ARCH_MODE, 0)
+        logger.debug("ArchMode(): received a response with length: {}".format(len(response.data)))
+        self.target.send_ack_packet(DebugCommands.DEBUG_COMMAND_OK, response.seqno)
+        arch, = struct.unpack("<B", response.data)
+        return arch
 
     #### Utilities
     def read_null_terminated_string(self, addr, max_size = 1024):
