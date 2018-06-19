@@ -6,7 +6,7 @@ import traceback
 import datetime
 import inspect
 
-script_path = os.path.dirname(__file__)
+script_path = os.path.expanduser(os.path.dirname(__file__))
 if script_path not in sys.path:
 	sys.path.insert(0, script_path)
 	sys.path.insert(0, script_path + '/py')
