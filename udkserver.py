@@ -746,8 +746,13 @@ class UdkTargetStub(object):
         return response.data
 
     def register_size(self, register):
+        if self.arch == CpuArch.DEBUG_DATA_BREAK_CPU_ARCH_IA32:
+            naturalSize = 4
+        elif self.arch == CpuArch.DEBUG_DATA_BREAK_CPU_ARCH_X64:
+            naturalSize = 8
+
         if register < SOFT_DEBUGGER_REGISTER_FP_BASE:
-            return 8
+            return naturalSize
         elif register < Register.SOFT_DEBUGGER_REGISTER_ST0:
             if register == Register.SOFT_DEBUGGER_REGISTER_FP_FCW:
                 return 2
@@ -775,6 +780,9 @@ class UdkTargetStub(object):
         elif register <= Register.SOFT_DEBUGGER_REGISTER_XMM15:
             return 16
         else:
+            #
+            # MMX register
+            #
             return 8
 
     def read_register(self, register):

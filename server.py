@@ -34,6 +34,15 @@ registers = {
     'rbp': udkserver.Register.SOFT_DEBUGGER_REGISTER_BP,
     'rsp': udkserver.Register.SOFT_DEBUGGER_REGISTER_SP,
 
+    'eax': udkserver.Register.SOFT_DEBUGGER_REGISTER_AX,
+    'ebx': udkserver.Register.SOFT_DEBUGGER_REGISTER_BX,
+    'ecx': udkserver.Register.SOFT_DEBUGGER_REGISTER_CX,
+    'edx': udkserver.Register.SOFT_DEBUGGER_REGISTER_DX,
+    'esi': udkserver.Register.SOFT_DEBUGGER_REGISTER_SI,
+    'edi': udkserver.Register.SOFT_DEBUGGER_REGISTER_DI,
+    'ebp': udkserver.Register.SOFT_DEBUGGER_REGISTER_BP,
+    'esp': udkserver.Register.SOFT_DEBUGGER_REGISTER_SP,
+
     'r8':  udkserver.Register.SOFT_DEBUGGER_REGISTER_R8,
     'r9':  udkserver.Register.SOFT_DEBUGGER_REGISTER_R9,
     'r10': udkserver.Register.SOFT_DEBUGGER_REGISTER_R10,
@@ -44,6 +53,7 @@ registers = {
     'r15': udkserver.Register.SOFT_DEBUGGER_REGISTER_R15,
 
     'rip': udkserver.Register.SOFT_DEBUGGER_REGISTER_EIP,
+    'eip': udkserver.Register.SOFT_DEBUGGER_REGISTER_EIP,
     'eflags': udkserver.Register.SOFT_DEBUGGER_REGISTER_EFLAGS,
 
     'cs': udkserver.Register.SOFT_DEBUGGER_REGISTER_CS,
